@@ -66,6 +66,9 @@ from .aggregate_properties import (
 from .photometry import (
     run_photometry,
 )
+from .line_absorption import (
+    run_absorption,
+)
 from .log import configure_logger, get_logger, clean_logs, instantiation_message, output_summary, BANNER
 from .utils import repack_catalogue
 from .version import __version__
@@ -217,6 +220,7 @@ def execute_pipeline(
         "properties_ptype_specific": run_ptype_specific_properties,
         "properties_local_environment": run_local_environment,
         "photometry": run_photometry,
+        "line_absorption": run_absorption,
     }
 
     for stage_idx, stage in enumerate(ordered_stages):

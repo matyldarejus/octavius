@@ -110,6 +110,18 @@ stages:
         over: {band: from_config:bands}  # helper methods exist to make this work (see photometry_tables.py)
       - columns: ["luminosity_fir", "beta", "beta_nodust"]
 
+  line_absorption:
+    # under construction
+    label: absorption
+    applies_to: [galaxies]
+    requires: [properties_core, properties_ptype_specific]  # mass_star + haloes' r200c / sfr
+    cross_group_requirements:
+      galaxies: [haloes]  # r200c and central_galaxy_index via field_halo_index
+    needs_particle_columns: {}  # classification only; spectra are built standalone
+    outputs:
+      - columns: ["absorption_ssfr_class", "absorption_eligible", "absorption_bin_idx"]
+
+
 # output column conventions
 # stamped onto HDF5 arrays on the output catalogue
 # enforces dtypes, units, and provides descriptors
@@ -465,6 +477,25 @@ output_columns:
     unit:        ""
     a_exp:       0
     description: "UV spectral slope (no dust attenutation)."
+
+  absorption_ssfr_class:
+    dtype:       int64
+    unit:        ""
+    a_exp:       0
+    description: "sSFR class for absorption sampling (-1 unclassified, 0 star-forming, 1 green valley, 2 quenched)."
+
+  absorption_eligible:
+    dtype:       int64
+    unit:        ""
+    a_exp:       0
+    description: "1 if the galaxy passes the absorption sampling criteria, else 0."
+
+  absorption_bin_idx:
+    dtype:       int64
+    unit:        ""
+    a_exp:       0
+    description: "Absorption galaxy-bin index (mass_idx * n_classes + ssfr_class); -1 if in no bin."
+
 
 membership_columns:
 
