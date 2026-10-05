@@ -114,8 +114,6 @@ def classify_ssfr(*, galaxy_data: GalaxyData, redshift: float, params: SamplingP
     - SFR_ZERO:           quenched means exactly zero SFR (default).
     - BELOW_GREEN_VALLEY: quenched means zero SFR or below the green-valley floor.
 
-    Returns:
-    - ssfr_class: (n_gal,): int64 array of SSFR_CLASS_IDX values.
     """
     # all galaxies are given "UNCLASSIFIED" class by default
     ssfr_class = np.full(galaxy_data.n_galaxies, SSFR_CLASS_IDX["UNCLASSIFIED"], dtype=np.int64)
@@ -221,6 +219,35 @@ def count_bins(*, bin_idx: np.ndarray, n_bins: int) -> np.ndarray:
     return np.bincount(bin_idx[bin_idx >= 0], minlength=n_bins).astype(np.int64)
 
 
+def classify_and_bin(
+    *, galaxy_data: GalaxyData, params: SamplingParams, redshift: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[str, ...]]:
+    """
+
+    Classifies every galaxy by sSSFR, applies the selection criteria, and assigns bins, all-in-one.
+
+    This is done purely per-galaxy, so should be safe on rank-local galaxies.
+
+    Returns:
+    - ssfr_class: (n_gal,) SSFR_CLASS_IDX values
+    - eligible: (n_gal,) array of bools based on criteria met or not
+    - bin_idx: (n_gal,) bin indices, defaults to -1 for no assignment
+    - bin_labels: (n_bin,) labels
+
+    """
+    ssfr_class = classify_ssfr(galaxy_data=galaxy_data, redshift=redshift, params=params)
+    eligible = apply_criteria(galaxy_data=galaxy_data, params=params)
+
+    bin_idx, bin_labels = assign_bins(
+        log_mass_star=galaxy_data.log_mass_star,
+        ssfr_class=ssfr_class,
+        eligible=eligible,
+        mass_bin_edges=params.mass_bin_edges,
+        bin_by_ssfr=params.ssfr_classification != "NONE",
+    )
+    return ssfr_class, eligible, bin_idx, bin_labels
+
+
 def draw_without_replacement(
     *, candidates: np.ndarray, n_draw: int, rng: np.random.Generator, label: str
 ) -> np.ndarray:
@@ -305,25 +332,16 @@ def select_galaxies(*, galaxy_data: GalaxyData, params: SamplingParams, redshift
         eligible totals.
 
     """
-    bin_by_ssfr = params.ssfr_classification != "NONE"
+    # 1) classify galaxies, apply criteria, and bin
 
-    # 1) classify galaxies
-    ssfr_class = classify_ssfr(galaxy_data=galaxy_data, redshift=redshift, params=params)
-
-    # 2) apply selection criteria to get eligibility
-    eligible = apply_criteria(galaxy_data=galaxy_data, params=params)
-    bin_idx, bin_labels = assign_bins(
-        log_mass_star=galaxy_data.log_mass_star,
-        ssfr_class=ssfr_class,
-        eligible=eligible,
-        mass_bin_edges=params.mass_bin_edges,
-        bin_by_ssfr=bin_by_ssfr,
+    ssfr_class, eligible, bin_idx, bin_labels = classify_and_bin(
+        galaxy_data=galaxy_data, params=params, redshift=redshift
     )
 
     bin_total = count_bins(bin_idx=bin_idx, n_bins=len(bin_labels))
     rng = np.random.default_rng(params.seed)
 
-    # 3) sample
+    # 2) sample
     if params.mode == "ALL":
         selected = eligible.copy()
 
