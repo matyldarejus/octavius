@@ -149,6 +149,23 @@ def classify_ssfr(*, galaxy_data: GalaxyData, redshift: float, params: SamplingP
     return ssfr_class
 
 
+def build_galaxy_data(
+    *, mass_star: np.ndarray, sfr: np.ndarray, r200c: np.ndarray, is_central: np.ndarray
+) -> GalaxyData:
+    """
+
+    Build GalaxyData from per-galaxy arrays.
+
+    """
+    return GalaxyData(
+        log_mass_star=compute_log_mass_star(mass_star=mass_star),
+        sfr=sfr,
+        log_ssfr=compute_log_ssfr(sfr=sfr, mass_star=mass_star),
+        r200c=r200c,
+        is_central=is_central,
+    )
+
+
 # handle binning
 
 
@@ -368,6 +385,7 @@ def select_galaxies(*, galaxy_data: GalaxyData, params: SamplingParams, redshift
 
     return GalaxySample(
         selected=selected,
+        eligible=eligible,
         ssfr_class=ssfr_class,
         bin_idx=bin_idx,
         bin_labels=bin_labels,

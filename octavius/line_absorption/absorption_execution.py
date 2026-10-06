@@ -18,7 +18,7 @@ from ..log import get_logger
 
 # internal imports
 from .absorption_helpers import GalaxyData, SamplingParams
-from .galaxy_sampling import classify_and_bin, compute_log_mass_star, compute_log_ssfr
+from .galaxy_sampling import build_galaxy_data, classify_and_bin
 
 logger = get_logger()
 
@@ -36,7 +36,7 @@ def run_absorption(simulation_data: SimulationData, config: OctaviusConfig) -> N
     galaxies = simulation_data.groups["galaxies"]
     haloes = simulation_data.groups.get("haloes")
 
-    params = _prepare_sampling_params(config=config)
+    params = prepare_sampling_params(config=config)
     galaxy_data = _prepare_galaxy_data(galaxies=galaxies, haloes=haloes)
 
     ssfr_class, eligible, bin_idx, bin_labels = classify_and_bin(
@@ -57,7 +57,7 @@ def run_absorption(simulation_data: SimulationData, config: OctaviusConfig) -> N
     )
 
 
-def _prepare_sampling_params(*, config: OctaviusConfig) -> SamplingParams:
+def prepare_sampling_params(*, config: OctaviusConfig) -> SamplingParams:
     """
 
     Parses the config fields into SamplingParams. Validate mass-bin edges here.
@@ -104,21 +104,14 @@ def _prepare_galaxy_data(*, galaxies: GroupStore, haloes: GroupStore | None) -> 
 
     r200c = np.full(n_galaxies, np.nan)  # kpc a
 
-    # TEMP: check
-    if haloes is not None and "radius_200c" in haloes:
-        r200c[has_halo] = haloes["radius_200c"][field_halo_index[has_halo]]
+    if haloes is not None and "r200c" in haloes:
+        r200c[has_halo] = haloes["r200c"][field_halo_index[has_halo]]
     else:
         logger.warning("No 'r200c' present on haloes")
 
     is_central = _find_central_galaxies(field_halo_index=field_halo_index, mass_baryon=galaxies["mass_baryon"])
 
-    return GalaxyData(
-        log_mass_star=compute_log_mass_star(mass_star=mass_star),
-        sfr=sfr,
-        log_ssfr=compute_log_ssfr(sfr=sfr, mass_star=mass_star),
-        r200c=r200c,
-        is_central=is_central,
-    )
+    return build_galaxy_data(mass_star=mass_star, sfr=sfr, r200c=r200c, is_central=is_central)
 
 
 def _find_central_galaxies(*, field_halo_index: np.ndarray, mass_baryon: np.ndarray) -> np.ndarray:

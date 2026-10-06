@@ -79,6 +79,7 @@ class GalaxySample:
     """
 
     selected: np.ndarray
+    eligible: np.ndarray
     ssfr_class: np.ndarray  # SSFR_CLASS_IDX vals
     bin_idx: np.ndarray  # -1 if ineligble
     bin_labels: tuple[str, ...]
