@@ -1,17 +1,27 @@
 """
 
-Tests the galaxy sampling functions on synthetic galaxy populations.
+Tests the line absorption module.
+
+Right now, includes: config parsing, galaxy sampling, the pipeline stage and the standalone
+galaxy selection.
 
 """
 
 # default libraries
 from dataclasses import replace
+from pathlib import Path
 
 # other packages
+import h5py
 import numpy as np
+
+# testing
 import pytest
 
 # internal imports
+from octavius.data_management.conventions import OctaviusConfig
+from octavius.line_absorption import make_spectra
+from octavius.line_absorption.absorption_execution import _find_central_galaxies, prepare_sampling_params
 from octavius.line_absorption.absorption_helpers import SSFR_CLASS_IDX, GalaxyData, SamplingParams
 from octavius.line_absorption.galaxy_sampling import (
     LOG_SSFR_FLOOR,
@@ -20,11 +30,70 @@ from octavius.line_absorption.galaxy_sampling import (
     compute_log_ssfr,
     select_galaxies,
 )
+from octavius.run_octavius import analyse_snapshot
+from octavius.utils.generate_snapshots import generate_simba_snapshot
+
+CONFIG_PATH = Path(__file__).parent.parent / "octavius" / "config.yaml"
+STAGES = {
+    "find_galaxies": True,
+    "properties_core": True,
+    "properties_ptype_specific": True,
+    "properties_local_environment": False,
+    "photometry": False,
+    "line_absorption": True,
+}
 
 SF = SSFR_CLASS_IDX["STAR_FORMING"]
 GV = SSFR_CLASS_IDX["GREEN_VALLEY"]
 Q = SSFR_CLASS_IDX["QUENCHED"]
 UNC = SSFR_CLASS_IDX["UNCLASSIFIED"]
+
+
+# config
+
+
+def load_config(**overrides) -> OctaviusConfig:
+    return OctaviusConfig.from_yaml(config_path=CONFIG_PATH, photometry_table_path=None, **overrides)
+
+
+def test_line_absorption_section_parses():
+    config = load_config()
+    assert config.stages["line_absorption"] is False
+    assert config.galaxy_selection == "BINNED"
+    assert config.mass_bin_edges == [10.0, 10.25, 10.5, 10.75, 11.0, 11.25, 11.5]
+    assert config.explicit_galaxy_indices == []
+
+
+def test_enums_are_uppercased():
+    config = load_config(galaxy_selection="binned", ssfr_classification="ms_offset")
+    assert config.galaxy_selection == "BINNED"
+    assert config.ssfr_classification == "MS_OFFSET"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"galaxy_selection": "SOMETIMES"}, {"ssfr_classification": "VIBES"}, {"quenched_definition": "MAYBE"}],
+)
+def test_invalid_enums_raise(overrides):
+    with pytest.raises(ValueError):
+        load_config(**overrides)
+
+
+@pytest.mark.parametrize("field_name", ["galaxies_per_bin", "n_galaxies_random"])
+def test_nonpositive_counts_raise(field_name):
+    with pytest.raises(ValueError):
+        load_config(**{field_name: 0})
+
+
+@pytest.mark.parametrize("edges", [[10.0], [10.0, 10.0, 11.0], [11.0, 10.0]])
+def test_prepare_sampling_params_rejects_bad_edges(edges):
+    config = load_config(mass_bin_edges=edges)
+    with pytest.raises(ValueError):
+        prepare_sampling_params(config=config)
+
+
+# galaxy sampling
+
 
 DEFAULT_PARAMS = SamplingParams(
     mode="BINNED",
@@ -175,5 +244,85 @@ def test_explicit_mode_rejects_bad_indices(indices):
 def test_outputs_are_full_catalogue_length():
     galaxies = make_population(n=37)
     sample = select_galaxies(galaxy_data=galaxies, params=make_params(), redshift=0.0)
-    for array in (sample.selected, sample.ssfr_class, sample.bin_idx):
+    for array in (sample.selected, sample.eligible, sample.ssfr_class, sample.bin_idx):
         assert len(array) == 37
+
+
+def test_find_central_galaxies():
+    field_halo_index = np.array([0, 0, 1, -1, 1, 2])
+    mass_baryon = np.array([5.0, 9.0, 3.0, 100.0, 3.0, 1.0])
+    # halo 0 -> galaxy 1 (heavier); halo 1 tie -> galaxy 2 (lower index); orphan never central
+    expected = [False, True, True, False, False, True]
+    assert _find_central_galaxies(field_halo_index=field_halo_index, mass_baryon=mass_baryon).tolist() == expected
+
+
+# pipeline stage + standalone selection
+
+
+@pytest.fixture(scope="module")
+def absorption_run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, OctaviusConfig]:
+    tmp_dir = tmp_path_factory.mktemp("absorption")
+    snapshot_path = tmp_dir / "test_snapshot.hdf5"
+    generate_simba_snapshot(path=snapshot_path)
+
+    config = OctaviusConfig.from_yaml(  # same "just so it runs" parameters as tests/conftest.py
+        config_path=CONFIG_PATH,
+        simulation_type="SIMBA",
+        snapshot_path=snapshot_path,
+        output_dir=tmp_dir,
+        cores_per_rank=1,
+        halo_id_source="SNAPSHOT",
+        subhalo_override=True,
+        halo_catalogue_path=None,
+        photometry_table_path=None,
+        min_dm_per_halo=0,
+        min_stars_per_galaxy=2,
+        b=1.5,
+        velocity_factor=5,
+        compress_catalogue=False,
+        stages=STAGES,
+    )
+    return analyse_snapshot(config=config), config
+
+
+def test_stage_writes_absorption_columns(absorption_run):
+    catalogue_path, _ = absorption_run
+    with h5py.File(catalogue_path, "r") as f:
+        galaxy_data = f["galaxy_data"]
+        absorption = galaxy_data["properties/absorption"]
+        n_galaxies = len(galaxy_data["GalID"])
+
+        for name in ("absorption_ssfr_class", "absorption_eligible", "absorption_bin_idx"):
+            assert absorption[name].shape == (n_galaxies,)
+
+        assert set(np.unique(absorption["absorption_ssfr_class"][:])) <= {-1, 0, 1, 2}
+        assert set(np.unique(absorption["absorption_eligible"][:])) <= {0, 1}
+        assert np.all(absorption["absorption_bin_idx"][:] >= -1)
+
+
+def test_make_spectra_writes_selection(absorption_run):
+    catalogue_path, config = absorption_run
+    config = replace(config, absorption_selection_only=True)
+
+    selection_path = make_spectra(config=config)  # catalogue path derived from the config
+    assert selection_path.exists()
+
+    with h5py.File(catalogue_path, "r") as cat, h5py.File(selection_path, "r") as sel:
+        n_galaxies = len(cat["galaxy_data/GalID"])
+        for name in ("selected", "eligible", "ssfr_class", "bin_idx"):
+            assert sel[name].shape == (n_galaxies,)
+        assert len(sel["bin_labels"]) == len(sel["bin_total"])
+        assert sel.attrs["mode"] == config.galaxy_selection
+
+
+def test_make_spectra_is_reproducible(absorption_run):
+    _, config = absorption_run
+    config = replace(config, absorption_selection_only=True)
+
+    first_path = make_spectra(config=config)
+    with h5py.File(first_path, "r") as f:
+        first = f["selected"][:]
+
+    second_path = make_spectra(config=config)  # also checks the 'w' overwrite works
+    with h5py.File(second_path, "r") as f:
+        assert np.array_equal(first, f["selected"][:])
