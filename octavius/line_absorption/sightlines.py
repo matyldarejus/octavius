@@ -83,6 +83,36 @@ def build_sightlines(
     )
 
 
+def build_random_sightlines(
+    *, n_los: int, los_axis: int, boxsize: float, scale_factor: float, hubble: float, seed: int
+):
+    """
+
+    Places n_los random sightlines parallel to the LOS axis at positions drawn uniformly over the box.
+
+    """
+    rng = np.random.default_rng(seed)
+
+    # this is just across the whole box, so fill the remaining fields with -1's and Nan's
+    no_galaxy = np.full(n_los, -1, dtype=np.int64)
+    undefined = np.full(n_los, np.nan)
+
+    return Sightlines(
+        pos=rng.uniform(0.0, boxsize, size=(n_los, 2)),
+        entry_idx=no_galaxy,
+        galaxy_idx=no_galaxy.copy(),
+        impact_param=undefined,
+        impact=undefined.copy(),
+        azimuth=undefined.copy(),
+        azimuth_disc=undefined.copy(),
+        inclination=undefined.copy(),
+        gal_velocity_pos=undefined.copy(),
+        los_axis=los_axis,
+        boxsize=float(boxsize),
+        vbox=float(hubble * scale_factor * boxsize),
+    )
+
+
 def _disc_angles(
     *, ang_mom: np.ndarray, offset_dir: np.ndarray, impact: np.ndarray, los: int, first: int, second: int
 ) -> tuple[np.ndarray, np.ndarray]:

@@ -17,14 +17,14 @@ import pytest
 
 # internal imports
 from octavius.data_management.conventions import OctaviusConfig
-from octavius.line_absorption import make_spectra
+from octavius.line_absorption import run_absorption
 from octavius.line_absorption.absorption_execution import (
     prepare_sightline_params,
     read_sample_file,
     require_finite_r200c,
 )
 from octavius.line_absorption.absorption_helpers import SightlineParams, Sightlines
-from octavius.line_absorption.sightlines import build_sightlines
+from octavius.line_absorption.sightlines import build_random_sightlines, build_sightlines
 from octavius.run_octavius import analyse_snapshot
 from octavius.utils.generate_snapshots import generate_simba_snapshot
 
@@ -58,13 +58,15 @@ def test_enums_are_uppercased():
     assert config.absorption_los_axis == "X"
 
 
-@pytest.mark.parametrize("overrides", [{"impact_units": "MILES"}, {"absorption_los_axis": "W"}])
+@pytest.mark.parametrize(
+    "overrides", [{"impact_units": "MILES"}, {"absorption_los_axis": "W"}, {"absorption_los_mode": "STOCHASTIC"}]
+)
 def test_invalid_enums_raise(overrides):
     with pytest.raises(ValueError):
         load_config(**overrides)
 
 
-@pytest.mark.parametrize("field_name", ["n_azimuth", "absorption_chunk_size"])
+@pytest.mark.parametrize("field_name", ["n_azimuth", "absorption_chunk_size", "n_random_los"])
 def test_nonpositive_counts_raise(field_name):
     with pytest.raises(ValueError):
         load_config(**{field_name: 0})
@@ -217,7 +219,25 @@ def test_galaxy_velocity_includes_hubble_flow_and_wraps():
     assert sightlines.vbox == pytest.approx(vbox)
 
 
-# standalone make_spectra on a pipeline-built test catalogue
+def random_sightlines(*, n_los=200, seed=0) -> Sightlines:
+    return build_random_sightlines(n_los=n_los, los_axis=2, boxsize=BOXSIZE, scale_factor=0.5, hubble=HUBBLE, seed=seed)
+
+
+def test_random_sightlines_inside_box_with_sentinels():
+    sightlines = random_sightlines()
+    assert sightlines.n_los == 200
+    assert np.all((sightlines.pos >= 0.0) & (sightlines.pos < BOXSIZE))
+    assert np.all(sightlines.galaxy_idx == -1) and np.all(sightlines.entry_idx == -1)
+    assert np.all(np.isnan(sightlines.gal_velocity_pos)) and np.all(np.isnan(sightlines.impact))
+    assert sightlines.vbox == pytest.approx(HUBBLE * 0.5 * BOXSIZE)
+
+
+def test_random_sightlines_are_seeded():
+    assert np.array_equal(random_sightlines(seed=3).pos, random_sightlines(seed=3).pos)
+    assert not np.array_equal(random_sightlines(seed=3).pos, random_sightlines(seed=4).pos)
+
+
+# standalone run_absorption on a pipeline-built test catalogue
 
 
 @pytest.fixture(scope="module")
@@ -246,7 +266,7 @@ def absorption_run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Octa
     return analyse_snapshot(config=config), config
 
 
-def test_make_spectra_groups_entries_by_axis(absorption_run, tmp_path):
+def test_run_absorption_groups_entries_by_axis(absorption_run, tmp_path):
     catalogue_path, config = absorption_run
     with h5py.File(catalogue_path, "r") as f:
         n_galaxies = len(f["galaxy_data/GalID"])
@@ -256,7 +276,7 @@ def test_make_spectra_groups_entries_by_axis(absorption_run, tmp_path):
 
     # KPC units: the junk test haloes may lack a usable r200c
     config = replace(config, absorption_sample_path=sample_path, impact_units="KPC")
-    sightline_sets = make_spectra(config=config)
+    sightline_sets = run_absorption(config=config)
 
     assert [s.los_axis for s in sightline_sets] == [0, 2]  # X first, then Z
     n_per_entry = (1 if 0.0 in config.impact_parameters else 0) + sum(
@@ -268,7 +288,15 @@ def test_make_spectra_groups_entries_by_axis(absorption_run, tmp_path):
     assert set(sightline_sets[1].galaxy_idx.tolist()) == {0, n_galaxies - 1}
 
 
-def test_make_spectra_requires_a_sample_path(absorption_run):
+def test_run_absorption_requires_a_sample_path(absorption_run):
     _, config = absorption_run
     with pytest.raises(ValueError):
-        make_spectra(config=replace(config, absorption_sample_path=None))
+        run_absorption(config=replace(config, absorption_sample_path=None))
+
+
+def test_run_absorption_random_mode_needs_no_sample(absorption_run):
+    _, config = absorption_run
+    config = replace(config, absorption_los_mode="RANDOM", absorption_sample_path=None, n_random_los=50)
+    (sightlines,) = run_absorption(config=config)
+    assert sightlines.n_los == 50
+    assert sightlines.los_axis == {"X": 0, "Y": 1, "Z": 2}[config.absorption_los_axis]

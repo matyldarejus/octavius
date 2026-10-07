@@ -28,16 +28,16 @@ import numpy as np
 from astropy import units as u
 
 # internal imports
-from ..data_management import output_catalogue_path
+from ..data_management import OctaviusConstants, build_reader, output_catalogue_path
 from ..log import get_logger
 from ..utils import load_catalogue
 from .absorption_helpers import LOS_AXIS_IDX, SampleEntries, SightlineParams, Sightlines
-from .sightlines import build_sightlines
+from .sightlines import build_random_sightlines, build_sightlines
 
 logger = get_logger()
 
 
-def make_spectra(*, config: OctaviusConfig, catalogue_path: Path | None = None) -> Path:
+def run_absorption(*, config: OctaviusConfig, catalogue_path: Path | None = None) -> list[Sightlines]:
     """
 
     Gets a galaxy sample, prepares sightlines, and builds mock absorption spectra
@@ -48,14 +48,43 @@ def make_spectra(*, config: OctaviusConfig, catalogue_path: Path | None = None) 
     config: OctaviusConfig
         Config.
     catalogue_path: pathlib.Path, optional
-        Path to an Octavius catalogue.
+        SAMPLE mode: Path to an Octavius catalogue.
 
     Returns
     -----------
-    selection_path: pathlib.Path
-        Path to the galaxy selection file.
+    sightline_sets: list[Sightlines]
+        For SAMPLE mode: one set per projection axis in the sample. RANDOM: a single set.
 
     """
+    if config.absorption_los_mode == "RANDOM":
+        boxsize, scale_factor, hubble = _read_box_from_snapshot(config=config)
+        sightline_sets = [
+            build_random_sightlines(
+                n_los=config.n_random_los,
+                los_axis=LOS_AXIS_IDX[config.absorption_los_axis],
+                boxsize=boxsize,
+                scale_factor=scale_factor,
+                hubble=hubble,
+                seed=config.absorption_seed,
+            )
+        ]
+    else:
+        sightline_sets = _sample_sightlines(config=config, catalogue_path=catalogue_path)
+
+    n_los = sum(s.n_los for s in sightline_sets)
+    logger.info(f"Placed {n_los} sightlines ({config.absorption_los_mode} mode) along {len(sightline_sets)} axes.")
+    logger.warning("Gas preselection and spectra are not implemented yet; stopping after sightlines.")  # TODO: C7
+
+    return sightline_sets
+
+
+def _sample_sightlines(*, config: OctaviusConfig, catalogue_path: Path | None = None) -> list[Sightlines]:
+    """
+
+    Sample sightlines based on parameters and galaxy indices provided by the user.
+
+    """
+
     if config.absorption_sample_path is None:
         raise ValueError("absorption_sample_path is not set in the line_absorption config section.")
 
@@ -100,9 +129,6 @@ def make_spectra(*, config: OctaviusConfig, catalogue_path: Path | None = None) 
             )
         )
 
-    n_los = sum(s.n_los for s in sightline_sets)
-    logger.info(f"Placed {n_los} sightlines for {entries.n_entries} sample entries along {len(sightline_sets)} axes.")
-    logger.warning("Gas preselection and spectra are not implemented yet; stopping after sightlines.")  # TODO: C7
     return sightline_sets
 
 
@@ -189,8 +215,11 @@ def _read_galaxy_geometry(*, catalogue: OctaviusCatalogue, galaxy_idx: np.ndarra
     host = galaxies.get_membership("field_halo_index")[galaxy_idx]  # -1 if None
 
     r200c = np.full(len(galaxy_idx), np.nan)
-    has_host = host >= 0
-    r200c[has_host] = haloes.get_dataset("r200c")[host[has_host]]
+
+    haloes_columns = haloes.keys()  # fix for SIM118 false positive
+    if "r200c" in haloes_columns:  # unneccesary after name mismatch is fixed, in-place for testing with test catalogue
+        has_host = host >= 0
+        r200c[has_host] = haloes.get_dataset("r200c")[host[has_host]]
 
     return {
         "centre": galaxies.get_dataset("com_pos_baryon")[galaxy_idx],
@@ -198,3 +227,17 @@ def _read_galaxy_geometry(*, catalogue: OctaviusCatalogue, galaxy_idx: np.ndarra
         "ang_mom": galaxies.get_dataset("L_baryon")[galaxy_idx],
         "r200c": r200c,
     }
+
+
+def _read_box_from_snapshot(*, config: OctaviusConfig) -> tuple[float, float, float]:
+    """
+
+    Reads the box size, the scale factor, and Hubble constant from the snapshot header.
+
+    """
+    reader = build_reader(
+        snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
+    )
+    sim = reader.simulation_attributes
+    hubble = (sim.Hz * u.km / u.s / u.Mpc).to(u.km / u.s / u.kpc).value
+    return float(sim.boxsize), float(sim.scale_factor), float(hubble)
