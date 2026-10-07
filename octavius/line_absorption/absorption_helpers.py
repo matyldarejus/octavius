@@ -7,90 +7,78 @@ Includes shared containers and index maps for the line absorption module.
 """
 
 # default libraries
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # other packages
 import numpy as np
 
-SSFR_CLASS_IDX: dict[str, int] = {"UNCLASSIFIED": -1, "STAR_FORMING": 0, "GREEN_VALLEY": 1, "QUENCHED": 2}
+LOS_AXIS_IDX: dict[str, int] = {"X": 0, "Y": 1, "Z": 2}
 
-# classification names in index order
-SSFR_CLASS_NAMES: tuple[str, ...] = tuple(
-    name for name, idx in sorted(SSFR_CLASS_IDX.items(), key=lambda item: item[1]) if idx >= 0
-)
+
+def plane_axes(*, los_axis: int) -> tuple[int, int]:
+    """
+
+    Right-handed pair of axes spanning the plane perpendicular to the LOS axis.
+
+    """
+    return (los_axis + 1) % 3, (los_axis + 2) % 3
 
 
 @dataclass(frozen=True, slots=True)
-class GalaxyData:
+class SampleEntries:
     """
 
-    Galaxy quantities needed for galaxy sampling.
-    All arrays have leading dimension n_gal and are in catalogue index order.
+    The user's galaxy sample.
+    One entry is equivalent to one galaxy along one projection axis.
 
     """
 
-    log_mass_star: np.ndarray  # -inf for mass_star <= 0
-    sfr: np.ndarray
-    log_ssfr: np.ndarray  # LOG_SSFR_FLOOR where sfr <= 0
-    r200c: np.ndarray  # r200c of the field halo in kpc, needs confirmation
-    is_central: np.ndarray
+    galaxy_idx: np.ndarray  # catalogue galaxy indices
+    los_axis: np.ndarray  # projection axis desired, if None: defaults to config
+    bin_label: np.ndarray  # the user's binning
+    attrs: dict = field(default_factory=dict)
 
     @property
-    def n_galaxies(self) -> int:
-        return len(self.sfr)
+    def n_entries(self) -> int:
+        return len(self.galaxy_idx)
 
 
 @dataclass(frozen=True, slots=True)
-class SamplingParams:
+class SightlineParams:
     """
 
-    Galaxy sampling parameters read in from the config.
+    Dataclass containing parameters for generating lines of sight.
 
     """
 
-    mode: str  # ALL, RANDOM, BINNED, EXPLICIT
-    explicit_indices: np.ndarray  # catalogue indices
-    centrals_only: bool
-    mass_bin_edges: np.ndarray
-    galaxies_per_bin: int
-    n_galaxies_random: int
-    seed: int
-    ssfr_classification: str  # SSFR CUT, MS_OFFSET, NONE
-    quenched_definition: str  # SFR_ZERO | BELOW_GREEN_VALLEY
-    ssfr_intercept: float  # log10 yr^-1
-    ssfr_redshift_slope: float  # dex per unit redshift
-    green_valley_width: float  # dex
-    ms_slope: float
-    ms_intercept: float
-    ms_scatter: float  # dex
-    sf_n_sigma: float
-    gv_n_sigma: float
+    impact_parameters: np.ndarray  # in impact_units, >= 0
+    impact_in_r200c: bool  # True: fractions of host r200c; False: physical kpc
+    n_azimuth: int
 
 
 @dataclass(frozen=True, slots=True)
-class GalaxySample:
+class Sightlines:
     """
 
-    Dataclass containing the sampled galaxies.
+    Dataclass containing line of sight properties for the galaxy sample entries.
 
-    Per-galaxy arrays are full catalogue length,
-    and mode determines which exactly are selected.
+    These are projected along one axis, through the whole box.
 
     """
 
-    selected: np.ndarray
-    eligible: np.ndarray
-    ssfr_class: np.ndarray  # SSFR_CLASS_IDX vals
-    bin_idx: np.ndarray  # -1 if ineligble
-    bin_labels: tuple[str, ...]
-    bin_total: np.ndarray  # eligible population per bin
-    mode: str
+    pos: np.ndarray  # kpc a, in plane_axes order
+    entry_idx: np.ndarray
+    galaxy_idx: np.ndarray
+    impact_param: np.ndarray  # impact parameter in impact_units
+    impact: np.ndarray  # comoving impact parameter
+    azimuth: np.ndarray  # from the first plane axis
+    azimuth_disc: np.ndarray  # from the projected major axis; NaN if face-on or b = 0
+    inclination: np.ndarray  # between L and the LOS axis (0 = face-on); NaN if L = 0
+    gal_velocity_pos: np.ndarray  # km/s, galaxy LOS velocity incl. Hubble flow
+    los_axis: int
+    boxsize: float  # kpc a
+    vbox: float  # km/s, Hubble velocity across the box
 
     @property
-    def indices(self) -> np.ndarray:
-        # return indices of the selected galaxies
-        return np.flatnonzero(self.selected)
-
-    @property
-    def n_selected(self) -> int:
-        return len(self.indices)
+    def n_los(self) -> int:
+        return len(self.galaxy_idx)

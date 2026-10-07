@@ -2,9 +2,6 @@
 
 Tests the line absorption module.
 
-Right now, includes: config parsing, galaxy sampling, the pipeline stage and the standalone
-galaxy selection.
-
 """
 
 # default libraries
@@ -21,15 +18,13 @@ import pytest
 # internal imports
 from octavius.data_management.conventions import OctaviusConfig
 from octavius.line_absorption import make_spectra
-from octavius.line_absorption.absorption_execution import _find_central_galaxies, prepare_sampling_params
-from octavius.line_absorption.absorption_helpers import SSFR_CLASS_IDX, GalaxyData, SamplingParams
-from octavius.line_absorption.galaxy_sampling import (
-    LOG_SSFR_FLOOR,
-    assign_bins,
-    classify_ssfr,
-    compute_log_ssfr,
-    select_galaxies,
+from octavius.line_absorption.absorption_execution import (
+    prepare_sightline_params,
+    read_sample_file,
+    require_finite_r200c,
 )
+from octavius.line_absorption.absorption_helpers import SightlineParams, Sightlines
+from octavius.line_absorption.sightlines import build_sightlines
 from octavius.run_octavius import analyse_snapshot
 from octavius.utils.generate_snapshots import generate_simba_snapshot
 
@@ -40,13 +35,7 @@ STAGES = {
     "properties_ptype_specific": True,
     "properties_local_environment": False,
     "photometry": False,
-    "line_absorption": True,
 }
-
-SF = SSFR_CLASS_IDX["STAR_FORMING"]
-GV = SSFR_CLASS_IDX["GREEN_VALLEY"]
-Q = SSFR_CLASS_IDX["QUENCHED"]
-UNC = SSFR_CLASS_IDX["UNCLASSIFIED"]
 
 
 # config
@@ -58,205 +47,177 @@ def load_config(**overrides) -> OctaviusConfig:
 
 def test_line_absorption_section_parses():
     config = load_config()
-    assert config.stages["line_absorption"] is False
-    assert config.galaxy_selection == "BINNED"
-    assert config.mass_bin_edges == [10.0, 10.25, 10.5, 10.75, 11.0, 11.25, 11.5]
-    assert config.explicit_galaxy_indices == []
+    assert config.absorption_sample_path == Path("/path/to/sample.hdf5")
+    assert config.impact_units == "R200"
+    assert config.absorption_los_axis == "Z"
 
 
 def test_enums_are_uppercased():
-    config = load_config(galaxy_selection="binned", ssfr_classification="ms_offset")
-    assert config.galaxy_selection == "BINNED"
-    assert config.ssfr_classification == "MS_OFFSET"
+    config = load_config(impact_units="kpc", absorption_los_axis="x")
+    assert config.impact_units == "KPC"
+    assert config.absorption_los_axis == "X"
 
 
-@pytest.mark.parametrize(
-    "overrides",
-    [{"galaxy_selection": "SOMETIMES"}, {"ssfr_classification": "VIBES"}, {"quenched_definition": "MAYBE"}],
-)
+@pytest.mark.parametrize("overrides", [{"impact_units": "MILES"}, {"absorption_los_axis": "W"}])
 def test_invalid_enums_raise(overrides):
     with pytest.raises(ValueError):
         load_config(**overrides)
 
 
-@pytest.mark.parametrize("field_name", ["galaxies_per_bin", "n_galaxies_random"])
+@pytest.mark.parametrize("field_name", ["n_azimuth", "absorption_chunk_size"])
 def test_nonpositive_counts_raise(field_name):
     with pytest.raises(ValueError):
         load_config(**{field_name: 0})
 
 
-@pytest.mark.parametrize("edges", [[10.0], [10.0, 10.0, 11.0], [11.0, 10.0]])
-def test_prepare_sampling_params_rejects_bad_edges(edges):
-    config = load_config(mass_bin_edges=edges)
+@pytest.mark.parametrize("impact_parameters", [[], [-0.5], [np.nan]])
+def test_prepare_sightline_params_rejects_bad_impacts(impact_parameters):
     with pytest.raises(ValueError):
-        prepare_sampling_params(config=config)
+        prepare_sightline_params(config=load_config(impact_parameters=impact_parameters))
 
 
-# galaxy sampling
+# sample file
 
 
-DEFAULT_PARAMS = SamplingParams(
-    mode="BINNED",
-    explicit_indices=np.array([], dtype=np.int64),
-    centrals_only=True,
-    mass_bin_edges=np.array([10.0, 10.5, 11.0]),
-    galaxies_per_bin=2,
-    n_galaxies_random=3,
-    seed=42,
-    ssfr_classification="SSFR_CUT",
-    quenched_definition="SFR_ZERO",
-    ssfr_intercept=-10.8,
-    ssfr_redshift_slope=0.3,
-    green_valley_width=1.0,
-    ms_slope=0.73,
-    ms_intercept=-7.33,
-    ms_scatter=0.39,
-    sf_n_sigma=1.0,
-    gv_n_sigma=3.0,
-)
+def write_sample_file(path: Path, *, galaxy_idx, los_axis=None, bin_label=None, **attrs) -> Path:
+    with h5py.File(path, "w") as f:
+        f.create_dataset("galaxy_idx", data=np.asarray(galaxy_idx, dtype=np.int64))
+        if los_axis is not None:
+            f.create_dataset("los_axis", data=list(los_axis), dtype=h5py.string_dtype())
+        if bin_label is not None:
+            f.create_dataset("bin_label", data=list(bin_label), dtype=h5py.string_dtype())
+        for key, value in attrs.items():
+            f.attrs[key] = value
+    return path
 
 
-def make_params(**overrides) -> SamplingParams:
-    return replace(DEFAULT_PARAMS, **overrides)
-
-
-def make_galaxies(*, log_mass_star, log_ssfr, sfr=None, r200c=None, is_central=None) -> GalaxyData:
-    n = len(log_mass_star)
-    return GalaxyData(
-        log_mass_star=np.asarray(log_mass_star, dtype=np.float64),
-        sfr=np.ones(n) if sfr is None else np.asarray(sfr, dtype=np.float64),
-        log_ssfr=np.asarray(log_ssfr, dtype=np.float64),
-        r200c=np.full(n, 100.0) if r200c is None else np.asarray(r200c, dtype=np.float64),
-        is_central=np.ones(n, dtype=bool) if is_central is None else np.asarray(is_central, dtype=bool),
+def test_sample_file_parses_axes_labels_and_attrs(tmp_path):
+    path = write_sample_file(
+        tmp_path / "s.hdf5", galaxy_idx=[3, 3, 7], los_axis=["z", "X", "Z"], bin_label=["a", "a", "b"], note="test"
     )
+    entries = read_sample_file(path=path, n_galaxies=10, default_los_axis=2)
+    assert entries.galaxy_idx.tolist() == [3, 3, 7]  # the same galaxy on two axes is allowed
+    assert entries.los_axis.tolist() == [2, 0, 2]
+    assert entries.bin_label.tolist() == ["a", "a", "b"]
+    assert entries.attrs["note"] == "test"
 
 
-def make_population(*, n: int, seed: int = 0) -> GalaxyData:
-    rng = np.random.default_rng(seed)
-    return make_galaxies(log_mass_star=rng.uniform(10.0, 11.5, n), log_ssfr=rng.uniform(-11.0, -9.0, n))
-
-
-def test_compute_log_ssfr_floors_zero_sfr():
-    log_ssfr = compute_log_ssfr(sfr=np.array([0.0, 1.0]), mass_star=np.array([1e10, 1e10]))
-    assert log_ssfr[0] == LOG_SSFR_FLOOR
-    assert log_ssfr[1] == pytest.approx(-10.0)
+def test_sample_file_default_axis(tmp_path):
+    path = write_sample_file(tmp_path / "s.hdf5", galaxy_idx=[1, 2])
+    entries = read_sample_file(path=path, n_galaxies=5, default_los_axis=1)
+    assert entries.los_axis.tolist() == [1, 1]
+    assert entries.bin_label is None
 
 
 @pytest.mark.parametrize(
-    "quenched_definition, expected",
+    "kwargs",
     [
-        ("SFR_ZERO", [SF, SF, GV, UNC, Q]),
-        ("BELOW_GREEN_VALLEY", [SF, SF, GV, Q, Q]),
+        {"galaxy_idx": [0, 99]},  # out of range
+        {"galaxy_idx": [-1]},
+        {"galaxy_idx": [2, 2], "los_axis": ["Z", "Z"]},  # repeated (galaxy, axis)
+        {"galaxy_idx": [1], "los_axis": ["W"]},  # bad axis
+        {"galaxy_idx": [1, 2], "bin_label": ["only one"]},  # length mismatch
+        {"galaxy_idx": []},
     ],
 )
-def test_classify_ssfr_thresholds(quenched_definition, expected):
-    # at z = 0: sf_threshold = -10.8 (inclusive), gv_floor = -11.8 (inclusive)
-    galaxies = make_galaxies(
-        log_mass_star=[10.2] * 5,
-        log_ssfr=[-9.0, -10.8, -11.8 + 1e-9, -11.8 - 1e-9, LOG_SSFR_FLOOR],
-        sfr=[1.0, 1.0, 1.0, 1.0, 0.0],
+def test_sample_file_rejects_bad_input(tmp_path, kwargs):
+    path = write_sample_file(tmp_path / "s.hdf5", **kwargs)
+    with pytest.raises((ValueError, IndexError)):
+        read_sample_file(path=path, n_galaxies=10, default_los_axis=2)
+
+
+def test_require_finite_r200c():
+    require_finite_r200c(r200c=np.array([100.0, 50.0]), galaxy_idx=np.array([0, 1]))
+    with pytest.raises(ValueError):
+        require_finite_r200c(r200c=np.array([100.0, np.nan]), galaxy_idx=np.array([0, 1]))
+
+
+# sightlines
+
+BOXSIZE = 1000.0  # kpc a
+HUBBLE = 0.07  # km/s/kpc (70 km/s/Mpc)
+
+
+def make_sightline_params(**overrides) -> SightlineParams:
+    defaults = SightlineParams(impact_parameters=np.array([0.0, 0.5, 1.0]), impact_in_r200c=True, n_azimuth=4)
+    return replace(defaults, **overrides)
+
+
+def place(*, centre, velocity=None, ang_mom=None, r200c=None, scale_factor=1.0, los_axis=2, **overrides) -> Sightlines:
+    centre = np.atleast_2d(np.asarray(centre, dtype=np.float64))
+    n = len(centre)
+    return build_sightlines(
+        entry_idx=np.arange(n) + 100,
+        galaxy_idx=np.arange(n) + 10,
+        centre=centre,
+        velocity=np.zeros((n, 3)) if velocity is None else np.atleast_2d(velocity),
+        ang_mom=np.tile([1.0, 0.0, 0.0], (n, 1)) if ang_mom is None else np.atleast_2d(ang_mom),
+        r200c=np.full(n, 100.0) if r200c is None else np.asarray(r200c, dtype=np.float64),
+        params=make_sightline_params(**overrides),
+        los_axis=los_axis,
+        boxsize=BOXSIZE,
+        scale_factor=scale_factor,
+        hubble=HUBBLE,
     )
-    params = make_params(quenched_definition=quenched_definition)
-    assert classify_ssfr(galaxy_data=galaxies, redshift=0.0, params=params).tolist() == expected
 
 
-def test_classify_ssfr_nan_sfr_is_unclassified():
-    galaxies = make_galaxies(log_mass_star=[10.2], log_ssfr=[LOG_SSFR_FLOOR], sfr=[np.nan])
-    params = make_params(quenched_definition="BELOW_GREEN_VALLEY")
-    assert classify_ssfr(galaxy_data=galaxies, redshift=0.0, params=params).tolist() == [UNC]
+def periodic_offset(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    return (a - b + 0.5 * BOXSIZE) % BOXSIZE - 0.5 * BOXSIZE
 
 
-def test_none_classification_bins_by_mass_only():
-    galaxies = make_population(n=50)
-    sample = select_galaxies(galaxy_data=galaxies, params=make_params(ssfr_classification="NONE"), redshift=0.0)
-    assert np.all(sample.ssfr_class == UNC)
-    assert len(sample.bin_labels) == 2
+def test_sightline_count_and_zero_impact():
+    sightlines = place(centre=[[500.0, 500.0, 500.0], [200.0, 200.0, 200.0]])
+    assert sightlines.n_los == 2 * (1 + 4 + 4)  # b = 0 collapses to one sightline per entry
+    assert sightlines.galaxy_idx.tolist() == [10] * 9 + [11] * 9
+    assert sightlines.entry_idx.tolist() == [100] * 9 + [101] * 9
+    assert np.allclose(sightlines.pos[0], [500.0, 500.0])  # first sightline: b = 0 through the centre
 
 
-def test_mass_bin_edges():
-    log_mass_star = np.array([10.0, 10.5, 11.0, 9.99, 11.01])
-    bin_idx, _ = assign_bins(
-        log_mass_star=log_mass_star,
-        ssfr_class=np.full(5, UNC),
-        eligible=np.ones(5, dtype=bool),
-        mass_bin_edges=np.array([10.0, 10.5, 11.0]),
-        bin_by_ssfr=False,
-    )
-    assert bin_idx.tolist() == [0, 1, 1, -1, -1]  # lower edge inclusive, last bin closed
+def test_sightlines_wrap_and_keep_impact_distance():
+    sightlines = place(centre=[[990.0, 5.0, 500.0]])  # near the box edge
+    assert np.all((sightlines.pos >= 0.0) & (sightlines.pos < BOXSIZE))
+    distance = np.linalg.norm(periodic_offset(sightlines.pos, np.array([990.0, 5.0])), axis=1)
+    assert np.allclose(distance, sightlines.impact)
 
 
-def test_criteria_exclude_satellites_and_missing_r200c():
-    galaxies = make_galaxies(
-        log_mass_star=[10.2, 10.2, 10.2],
-        log_ssfr=[-10.0, -10.0, -10.0],
-        r200c=[100.0, np.nan, 100.0],
-        is_central=[True, True, False],
-    )
-    sample = select_galaxies(galaxy_data=galaxies, params=make_params(mode="ALL"), redshift=0.0)
-    assert sample.selected.tolist() == [True, False, False]
+def test_physical_kpc_impact_is_converted_to_comoving():
+    sightlines = place(centre=[[500.0, 500.0, 500.0]], impact_in_r200c=False, scale_factor=0.5)
+    nonzero = sightlines.impact_param > 0
+    assert np.allclose(sightlines.impact[nonzero], sightlines.impact_param[nonzero] / 0.5)
 
 
-def test_bin_total_counts_eligible_population():
-    galaxies = make_population(n=200)
-    sample = select_galaxies(galaxy_data=galaxies, params=make_params(), redshift=0.0)
-    expected = np.array([(sample.bin_idx == b).sum() for b in range(len(sample.bin_labels))])
-    assert np.array_equal(sample.bin_total, expected)
+def test_plane_axes_follow_los_axis():
+    sightlines = place(centre=[[100.0, 200.0, 300.0]], los_axis=0)  # LOS = X: plane = (Y, Z)
+    assert np.allclose(sightlines.pos[0], [200.0, 300.0])
+    assert sightlines.los_axis == 0
 
 
-def test_binned_draw_counts_and_short_bins():
-    galaxies = make_population(n=200)
-    sample = select_galaxies(galaxy_data=galaxies, params=make_params(galaxies_per_bin=5), redshift=0.0)
-    for b in range(len(sample.bin_labels)):
-        n_selected = (sample.selected & (sample.bin_idx == b)).sum()
-        assert n_selected == min(5, sample.bin_total[b])  # short bins take everyone
+def test_disc_azimuth_and_inclination():
+    # L along +X with LOS = Z: edge-on disc, projected major axis along Y
+    sightlines = place(centre=[[500.0, 500.0, 500.0]], ang_mom=[[1.0, 0.0, 0.0]])
+    phi, phi_disc = sightlines.azimuth, sightlines.azimuth_disc
+    has_offset = sightlines.impact > 0
+    assert np.isnan(phi_disc[0])  # b = 0
+    assert np.allclose(phi_disc[np.isclose(phi, 0.0) & has_offset], np.pi / 2)  # offsets along X = minor axis
+    assert np.allclose(phi_disc[np.isclose(phi, np.pi / 2) & has_offset], 0.0)  # offsets along Y = major axis
+    assert np.allclose(sightlines.inclination, np.pi / 2)  # edge-on
 
 
-def test_selection_is_deterministic_and_seed_dependent():
-    galaxies = make_population(n=500)
-    first = select_galaxies(galaxy_data=galaxies, params=make_params(seed=1), redshift=0.0)
-    again = select_galaxies(galaxy_data=galaxies, params=make_params(seed=1), redshift=0.0)
-    other = select_galaxies(galaxy_data=galaxies, params=make_params(seed=2), redshift=0.0)
-    assert np.array_equal(first.selected, again.selected)
-    assert not np.array_equal(first.selected, other.selected)
+def test_face_on_disc_has_no_disc_azimuth():
+    sightlines = place(centre=[[500.0, 500.0, 500.0]], ang_mom=[[0.0, 0.0, 1.0]])
+    assert np.all(np.isnan(sightlines.azimuth_disc))
+    assert np.allclose(sightlines.inclination, 0.0)
 
 
-def test_random_mode_draws_requested_number():
-    galaxies = make_population(n=100)
-    sample = select_galaxies(galaxy_data=galaxies, params=make_params(mode="RANDOM"), redshift=0.0)
-    assert sample.n_selected == 3
+def test_galaxy_velocity_includes_hubble_flow_and_wraps():
+    sightlines = place(centre=[[500.0, 500.0, 400.0]], velocity=[[0.0, 0.0, -50.0]], scale_factor=0.5)
+    vbox = HUBBLE * 0.5 * BOXSIZE
+    expected = (-50.0 + HUBBLE * 0.5 * 400.0) % vbox
+    assert np.allclose(sightlines.gal_velocity_pos, expected)
+    assert sightlines.vbox == pytest.approx(vbox)
 
 
-def test_explicit_mode_ignores_criteria():
-    galaxies = make_galaxies(log_mass_star=[10.2, 12.0], log_ssfr=[-10.0, -10.0])  # galaxy 1 out of mass range
-    params = make_params(mode="EXPLICIT", explicit_indices=np.array([1]))
-    sample = select_galaxies(galaxy_data=galaxies, params=params, redshift=0.0)
-    assert sample.indices.tolist() == [1]
-
-
-@pytest.mark.parametrize("indices", [[5], [-1], [0, 0]])
-def test_explicit_mode_rejects_bad_indices(indices):
-    galaxies = make_population(n=3)
-    params = make_params(mode="EXPLICIT", explicit_indices=np.array(indices))
-    with pytest.raises((IndexError, ValueError)):
-        select_galaxies(galaxy_data=galaxies, params=params, redshift=0.0)
-
-
-def test_outputs_are_full_catalogue_length():
-    galaxies = make_population(n=37)
-    sample = select_galaxies(galaxy_data=galaxies, params=make_params(), redshift=0.0)
-    for array in (sample.selected, sample.eligible, sample.ssfr_class, sample.bin_idx):
-        assert len(array) == 37
-
-
-def test_find_central_galaxies():
-    field_halo_index = np.array([0, 0, 1, -1, 1, 2])
-    mass_baryon = np.array([5.0, 9.0, 3.0, 100.0, 3.0, 1.0])
-    # halo 0 -> galaxy 1 (heavier); halo 1 tie -> galaxy 2 (lower index); orphan never central
-    expected = [False, True, True, False, False, True]
-    assert _find_central_galaxies(field_halo_index=field_halo_index, mass_baryon=mass_baryon).tolist() == expected
-
-
-# pipeline stage + standalone selection
+# standalone make_spectra on a pipeline-built test catalogue
 
 
 @pytest.fixture(scope="module")
@@ -285,44 +246,29 @@ def absorption_run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Octa
     return analyse_snapshot(config=config), config
 
 
-def test_stage_writes_absorption_columns(absorption_run):
-    catalogue_path, _ = absorption_run
-    with h5py.File(catalogue_path, "r") as f:
-        galaxy_data = f["galaxy_data"]
-        absorption = galaxy_data["properties/absorption"]
-        n_galaxies = len(galaxy_data["GalID"])
-
-        for name in ("absorption_ssfr_class", "absorption_eligible", "absorption_bin_idx"):
-            assert absorption[name].shape == (n_galaxies,)
-
-        assert set(np.unique(absorption["absorption_ssfr_class"][:])) <= {-1, 0, 1, 2}
-        assert set(np.unique(absorption["absorption_eligible"][:])) <= {0, 1}
-        assert np.all(absorption["absorption_bin_idx"][:] >= -1)
-
-
-def test_make_spectra_writes_selection(absorption_run):
+def test_make_spectra_groups_entries_by_axis(absorption_run, tmp_path):
     catalogue_path, config = absorption_run
-    config = replace(config, absorption_selection_only=True)
+    with h5py.File(catalogue_path, "r") as f:
+        n_galaxies = len(f["galaxy_data/GalID"])
+    sample_path = write_sample_file(
+        tmp_path / "sample.hdf5", galaxy_idx=[0, 0, n_galaxies - 1], los_axis=["Z", "X", "Z"]
+    )
 
-    selection_path = make_spectra(config=config)  # catalogue path derived from the config
-    assert selection_path.exists()
+    # KPC units: the junk test haloes may lack a usable r200c
+    config = replace(config, absorption_sample_path=sample_path, impact_units="KPC")
+    sightline_sets = make_spectra(config=config)
 
-    with h5py.File(catalogue_path, "r") as cat, h5py.File(selection_path, "r") as sel:
-        n_galaxies = len(cat["galaxy_data/GalID"])
-        for name in ("selected", "eligible", "ssfr_class", "bin_idx"):
-            assert sel[name].shape == (n_galaxies,)
-        assert len(sel["bin_labels"]) == len(sel["bin_total"])
-        assert sel.attrs["mode"] == config.galaxy_selection
+    assert [s.los_axis for s in sightline_sets] == [0, 2]  # X first, then Z
+    n_per_entry = (1 if 0.0 in config.impact_parameters else 0) + sum(
+        config.n_azimuth for p in config.impact_parameters if p > 0
+    )
+    assert sightline_sets[0].n_los == 1 * n_per_entry
+    assert sightline_sets[1].n_los == 2 * n_per_entry
+    assert sorted(set(sightline_sets[1].entry_idx.tolist())) == [0, 2]  # rows of the sample file
+    assert set(sightline_sets[1].galaxy_idx.tolist()) == {0, n_galaxies - 1}
 
 
-def test_make_spectra_is_reproducible(absorption_run):
+def test_make_spectra_requires_a_sample_path(absorption_run):
     _, config = absorption_run
-    config = replace(config, absorption_selection_only=True)
-
-    first_path = make_spectra(config=config)
-    with h5py.File(first_path, "r") as f:
-        first = f["selected"][:]
-
-    second_path = make_spectra(config=config)  # also checks the 'w' overwrite works
-    with h5py.File(second_path, "r") as f:
-        assert np.array_equal(first, f["selected"][:])
+    with pytest.raises(ValueError):
+        make_spectra(config=replace(config, absorption_sample_path=None))

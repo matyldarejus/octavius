@@ -12,7 +12,6 @@ stages:
   properties_ptype_specific:      true
   properties_local_environment:   true
   photometry:                     true
-  line_absorption:                false
 
 
 process_ptypes:  # WARNING: removes ptype entirely, e.g. star: false prevents galaxy finding
@@ -66,25 +65,19 @@ photometry:
 
 
 line_absorption:
-  # galaxy sampling
-  galaxy_selection:           BINNED      # ALL, RANDOM, BINNED, EXPLICIT
-  explicit_galaxy_indices:    []          # catalogue indices (EXPLICIT only; criteria ignored)
-  centrals_only:              true
-  mass_bin_edges:             [10.0, 10.25, 10.5, 10.75, 11.0, 11.25, 11.5]  # log10 Msun
-  galaxies_per_bin:           12          # BINNED only
-  n_galaxies_random:          200         # RANDOM only
+  absorption_sample_path:     /path/to/sample.hdf5
+  absorption_los_mode:        SAMPLE                        # sample, random
+  n_random_los:               1000   
   absorption_seed:            22082003
-  # sSFR classification
-  ssfr_classification:        SSFR_CUT    # SSFR_CUT | MS_OFFSET | NONE
-  quenched_definition:        SFR_ZERO    # SFR_ZERO | BELOW_GREEN_VALLEY
-  ssfr_intercept:             -10.8       # log10 yr^-1; Simba SF threshold (Appleby et al. 2023)
-  ssfr_redshift_slope:        0.3         # dex per unit redshift
-  green_valley_width:         1.0         # dex
-  ms_slope:                   0.73        # Belfiore+18  # VERIFY
-  ms_intercept:               -7.33       # log10 Msun/yr; Belfiore et al. 2018 
-  ms_scatter:                 0.29        # dex; Belfiore et al. 2018 
-  sf_n_sigma:                 1.0         # MS_OFFSET only
-  gv_n_sigma:                 3.0         # MS_OFFSET only
+  # sightlines
+  impact_parameters:          [0.25, 0.5, 0.75, 1.0, 1.25]  # in impact_units
+  impact_units:               R200                          # r200, kpc
+  n_azimuth:                  8                             
+  absorption_los_axis:        Z                             # x, y, z
+  # gas preselection
+  absorption_exclude_winds:   true        # drop decoupled wind particles (Simba: DelayTime != 0)
+  absorption_chunk_size:      4000000     # gas particles per streamed read, need testing
+
 
 parallelism:
   n_io_chunks:        10    # for IO reads on datasets, not chunking the pipeline

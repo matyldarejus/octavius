@@ -27,7 +27,9 @@ logger = get_logger()
 CONFIG_FIELDS = frozenset(
     {"thresholds", "physics", "fof6d", "properties", "photometry", "line_absorption", "parallelism", "logging"}
 )
-FILEPATHS = frozenset({"snapshot_path", "output_dir", "halo_catalogue_path", "photometry_table_path"})
+FILEPATHS = frozenset(
+    {"snapshot_path", "output_dir", "halo_catalogue_path", "photometry_table_path", "absorption_sample_path"}
+)
 VALID_SIM_TYPES = frozenset({"SIMBA", "SWIFT-KIARA", "SWIFT-EAGLE", "SWIFT-COLIBRE", "TNG"})
 VALID_HALO_CATS = frozenset({"SNAPSHOT", "AHF", "HBT-HERONS", "SUBFIND"})
 VALID_HALO_CENTRES = frozenset({"MIN_POT", "COM"})
@@ -35,9 +37,8 @@ VALID_EXT_LAWS = frozenset({"COMPOSITE", "POWER_LAW", "CARDELLI", "CONROY", "CAL
 VALID_KERNELS = frozenset(["CUBIC", "QUINTIC"])
 VALID_VIEW_AXES = frozenset({"X", "Y", "Z"})
 VALID_GAS_CRITERIA = frozenset({"COLD", "STARFORMING", "COLD_OR_STARFORMING", "DENSE_ONLY"})
-VALID_GALAXY_SELECTIONS = frozenset({"ALL", "RANDOM", "BINNED", "EXPLICIT"})
-VALID_SSFR_CLASSIFICATIONS = frozenset({"SSFR_CUT", "MS_OFFSET", "NONE"})
-VALID_QUENCHED_DEFINITIONS = frozenset({"SFR_ZERO", "BELOW_GREEN_VALLEY"})
+VALID_IMPACT_UNITS = frozenset({"R200", "KPC"})
+VALID_LOS_MODES = frozenset({"SAMPLE", "RANDOM"})
 ALWAYS_POSITIVE = frozenset(
     {
         "b",
@@ -46,8 +47,9 @@ ALWAYS_POSITIVE = frozenset(
         "interpolation_bins",
         "aperture_size",
         "virial_factors",
-        "galaxies_per_bin",
-        "n_galaxies_random",
+        "n_azimuth",
+        "absorption_chunk_size",
+        "n_random_los",
     }
 )
 
@@ -58,9 +60,9 @@ VALID_ENTRIES: dict[str, frozenset[str]] = {
     "viewing_axis": VALID_VIEW_AXES,
     "halo_centre": VALID_HALO_CENTRES,
     "kernel_type": VALID_KERNELS,
-    "galaxy_selection": VALID_GALAXY_SELECTIONS,
-    "ssfr_classification": VALID_SSFR_CLASSIFICATIONS,
-    "quenched_definition": VALID_QUENCHED_DEFINITIONS,
+    "impact_units": VALID_IMPACT_UNITS,
+    "absorption_los_axis": VALID_VIEW_AXES,
+    "absorption_los_mode": VALID_LOS_MODES,
 }
 
 VALID_COMBOS: dict[str, frozenset[str]] = {
@@ -107,7 +109,6 @@ class OctaviusConfig:
             "properties_ptype_specific": True,
             "properties_local_environment": True,
             "photometry": True,
-            "line_absorption": False,
         }
     )
 
@@ -154,25 +155,17 @@ class OctaviusConfig:
     power_law_alpha: float = 1.0
     split_age: float = 0.01
     _keep_spectra: bool = False  # used for standalone photometry, not in YAML file
-    galaxy_selection: str = "BINNED"
-    explicit_galaxy_indices: list[int] = field(default_factory=list)
-    centrals_only: bool = True
-    mass_bin_edges: list[float] = field(default_factory=lambda: [10.0, 10.25, 10.5, 10.75, 11.0, 11.25, 11.5])
-    galaxies_per_bin: int = 12
-    n_galaxies_random: int = 200
-    absorption_seed: int = 0
-    ssfr_classification: str = "SSFR_CUT"
-    quenched_definition: str = "SFR_ZERO"
-    ssfr_intercept: float = -10.8
-    ssfr_redshift_slope: float = 0.3
-    green_valley_width: float = 1.0
-    ms_slope: float = 0.73
-    ms_intercept: float = -7.33  # VERIFY Belfiore+18 (original code -7.7)
-    ms_scatter: float = 0.29  # VERIFY Belfiore+18 (original comment 0.39)
-    sf_n_sigma: float = 1.0
-    gv_n_sigma: float = 3.0
-    absorption_write_selection: bool = True
-    absorption_selection_only: bool = False
+
+    absorption_sample_path: Path | None = None
+    absorption_los_mode: str = "SAMPLE"
+    n_random_los: int = 1000
+    absorption_seed: int = 22082003
+    impact_parameters: list[float] = field(default_factory=lambda: [0.25, 0.5, 0.75, 1.0, 1.25])
+    impact_units: str = "R200"
+    n_azimuth: int = 8
+    absorption_los_axis: str = "Z"
+    absorption_exclude_winds: bool = True
+    absorption_chunk_size: int = 4000000
 
     terminal_output_level: str = "INFO"
     keep_logs: bool = False
