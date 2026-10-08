@@ -23,8 +23,14 @@ from octavius.line_absorption.absorption_execution import (
     read_sample_file,
     require_finite_r200c,
 )
-from octavius.line_absorption.absorption_helpers import SightlineParams, Sightlines
-from octavius.line_absorption.sightlines import build_random_sightlines, build_sightlines
+from octavius.line_absorption.absorption_helpers import SightlineParams, SightlineParticles, Sightlines, plane_axes
+from octavius.line_absorption.sightlines import (
+    assemble_sightline_particles,
+    build_random_sightlines,
+    build_sightline_grid,
+    build_sightlines,
+    find_overlaps,
+)
 from octavius.run_octavius import analyse_snapshot
 from octavius.utils.generate_snapshots import generate_simba_snapshot
 
@@ -237,6 +243,107 @@ def test_random_sightlines_are_seeded():
     assert not np.array_equal(random_sightlines(seed=3).pos, random_sightlines(seed=4).pos)
 
 
+# gas preselection
+
+
+def brute_force_overlaps(*, part_pos, support, sightlines) -> set[tuple[int, int]]:
+    first, second = plane_axes(los_axis=sightlines.los_axis)
+    plane_pos = part_pos[:, [first, second]]
+    pairs = set()
+    for s in range(sightlines.n_los):
+        offset = periodic_offset(plane_pos, sightlines.pos[s])
+        hits = np.flatnonzero(np.sum(offset**2, axis=1) < support**2)
+        pairs.update((int(i), s) for i in hits)
+    return pairs
+
+
+def random_gas(*, n: int, seed: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    part_pos = rng.uniform(0.0, BOXSIZE, size=(n, 3))
+    support = rng.uniform(5.0, 150.0, size=n)  # includes kernels that cross the box edge
+    return part_pos, support
+
+
+def grid_overlaps(*, part_pos, support, sightlines, cell_width=25.0) -> tuple[np.ndarray, np.ndarray]:
+    grid = build_sightline_grid(sightlines=sightlines, cell_width=cell_width)
+    return find_overlaps(part_pos=part_pos, support=support, grid=grid, los_axis=sightlines.los_axis, boxsize=BOXSIZE)
+
+
+@pytest.mark.parametrize("los_axis", [0, 1, 2])
+def test_overlaps_match_brute_force_including_wrap(los_axis):
+    sightlines = place(centre=[[500.0, 500.0, 500.0], [985.0, 10.0, 990.0]], los_axis=los_axis)  # one near corners
+    part_pos, support = random_gas(n=4000)
+    rows, los_idx = grid_overlaps(part_pos=part_pos, support=support, sightlines=sightlines)
+    found = set(zip(rows.tolist(), los_idx.tolist()))
+    assert len(found) == len(rows)  # no duplicate pairs
+    assert found == brute_force_overlaps(part_pos=part_pos, support=support, sightlines=sightlines)
+
+
+@pytest.mark.parametrize("cell_width", [5.0, 50.0, 500.0])
+def test_overlaps_independent_of_cell_width(cell_width):
+    sightlines = place(centre=[[300.0, 700.0, 500.0]])
+    part_pos, support = random_gas(n=2000)
+    rows, los_idx = grid_overlaps(part_pos=part_pos, support=support, sightlines=sightlines, cell_width=cell_width)
+    assert set(zip(rows.tolist(), los_idx.tolist())) == brute_force_overlaps(
+        part_pos=part_pos, support=support, sightlines=sightlines
+    )
+
+
+def test_overlaps_for_random_sightlines():
+    sightlines = random_sightlines(n_los=150)
+    part_pos, support = random_gas(n=3000)
+    rows, los_idx = grid_overlaps(part_pos=part_pos, support=support, sightlines=sightlines)
+    assert set(zip(rows.tolist(), los_idx.tolist())) == brute_force_overlaps(
+        part_pos=part_pos, support=support, sightlines=sightlines
+    )
+
+
+def test_zero_support_matches_nothing():
+    sightlines = place(centre=[[500.0, 500.0, 500.0]])
+    rows, _ = grid_overlaps(part_pos=np.array([[500.0, 500.0, 0.0]]), support=np.array([0.0]), sightlines=sightlines)
+    assert len(rows) == 0  # exactly on the central sightline, but masked
+
+
+def chunked_preselection(*, part_pos, support, sightlines, chunk_size) -> SightlineParticles:
+    grid = build_sightline_grid(sightlines=sightlines, cell_width=25.0)
+    particle_chunks, los_chunks = [], []
+    for start in range(0, len(part_pos), chunk_size):
+        idx = np.arange(start, min(start + chunk_size, len(part_pos)))
+        rows, los_idx = find_overlaps(
+            part_pos=part_pos[idx], support=support[idx], grid=grid, los_axis=sightlines.los_axis, boxsize=BOXSIZE
+        )
+        particle_chunks.append(idx[rows])
+        los_chunks.append(los_idx)
+    return assemble_sightline_particles(
+        particle_idx_chunks=particle_chunks, los_idx_chunks=los_chunks, n_los=sightlines.n_los
+    )
+
+
+def members(particles: SightlineParticles, s: int) -> set[int]:
+    rows = particles.los_members[particles.los_offsets[s] : particles.los_offsets[s + 1]]
+    return set(particles.particle_idx[rows].tolist())
+
+
+def test_chunked_preselection_equals_single_pass():
+    sightlines = place(centre=[[500.0, 500.0, 500.0], [985.0, 10.0, 500.0]])
+    part_pos, support = random_gas(n=3000)
+    single = chunked_preselection(part_pos=part_pos, support=support, sightlines=sightlines, chunk_size=len(part_pos))
+    chunked = chunked_preselection(part_pos=part_pos, support=support, sightlines=sightlines, chunk_size=700)
+    assert np.array_equal(single.particle_idx, chunked.particle_idx)
+    assert np.array_equal(single.los_offsets, chunked.los_offsets)
+    assert all(members(single, s) == members(chunked, s) for s in range(sightlines.n_los))
+
+
+def test_csr_maps_back_to_brute_force():
+    sightlines = place(centre=[[500.0, 500.0, 500.0]])
+    part_pos, support = random_gas(n=1500)
+    particles = chunked_preselection(part_pos=part_pos, support=support, sightlines=sightlines, chunk_size=400)
+    reference = brute_force_overlaps(part_pos=part_pos, support=support, sightlines=sightlines)
+    rebuilt = {(p, s) for s in range(sightlines.n_los) for p in members(particles, s)}
+    assert rebuilt == reference
+    assert np.all(np.diff(particles.particle_idx) > 0)
+
+
 # standalone run_absorption on a pipeline-built test catalogue
 
 
@@ -276,7 +383,9 @@ def test_run_absorption_groups_entries_by_axis(absorption_run, tmp_path):
 
     # KPC units: the junk test haloes may lack a usable r200c
     config = replace(config, absorption_sample_path=sample_path, impact_units="KPC")
-    sightline_sets = run_absorption(config=config)
+    results = run_absorption(config=config)
+
+    sightline_sets = [sightlines for sightlines, _ in results]
 
     assert [s.los_axis for s in sightline_sets] == [0, 2]  # X first, then Z
     n_per_entry = (1 if 0.0 in config.impact_parameters else 0) + sum(
@@ -286,6 +395,10 @@ def test_run_absorption_groups_entries_by_axis(absorption_run, tmp_path):
     assert sightline_sets[1].n_los == 2 * n_per_entry
     assert sorted(set(sightline_sets[1].entry_idx.tolist())) == [0, 2]  # rows of the sample file
     assert set(sightline_sets[1].galaxy_idx.tolist()) == {0, n_galaxies - 1}
+
+    for sightlines, particles in results:
+        assert len(particles.los_offsets) == sightlines.n_los + 1
+        assert particles.los_offsets[-1] == len(particles.los_members)
 
 
 def test_run_absorption_requires_a_sample_path(absorption_run):
@@ -297,6 +410,7 @@ def test_run_absorption_requires_a_sample_path(absorption_run):
 def test_run_absorption_random_mode_needs_no_sample(absorption_run):
     _, config = absorption_run
     config = replace(config, absorption_los_mode="RANDOM", absorption_sample_path=None, n_random_los=50)
-    (sightlines,) = run_absorption(config=config)
+    ((sightlines, particles),) = run_absorption(config=config)
     assert sightlines.n_los == 50
     assert sightlines.los_axis == {"X": 0, "Y": 1, "Z": 2}[config.absorption_los_axis]
+    assert len(particles.los_offsets) == 51

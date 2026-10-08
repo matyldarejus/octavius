@@ -7,12 +7,28 @@ Includes shared containers and index maps for the line absorption module.
 """
 
 # default libraries
+from collections import namedtuple
 from dataclasses import dataclass, field
 
 # other packages
 import numpy as np
 
 LOS_AXIS_IDX: dict[str, int] = {"X": 0, "Y": 1, "Z": 2}
+
+SightlineGrid = namedtuple(
+    "SightlineGrid",
+    [
+        "los_x",  # 1st plane axis
+        "los_y",  # 2nd plane axis
+        "sort_order",  # sightline indices sorted by cell
+        "cell_offsets",
+        "n_cells_x",
+        "n_cells_y",
+        "origin_x",  # kpc a
+        "origin_y",  # kpc a
+        "inv_cell_width",  # 1 / kpc a
+    ],
+)
 
 
 def plane_axes(*, los_axis: int) -> tuple[int, int]:
@@ -82,3 +98,20 @@ class Sightlines:
     @property
     def n_los(self) -> int:
         return len(self.galaxy_idx)
+
+
+@dataclass(frozen=True, slots=True)
+class SightlineParticles:
+    """
+
+    Gas preselected for one sightline set, in csr format for efficiency.
+
+    """
+
+    particle_idx: np.ndarray
+    los_offsets: np.ndarray
+    los_members: np.ndarray
+
+    @property
+    def n_kept(self) -> int:
+        return len(self.particle_idx)

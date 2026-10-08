@@ -31,13 +31,28 @@ from astropy import units as u
 from ..data_management import OctaviusConstants, build_reader, output_catalogue_path
 from ..log import get_logger
 from ..utils import load_catalogue
-from .absorption_helpers import LOS_AXIS_IDX, SampleEntries, SightlineParams, Sightlines
-from .sightlines import build_random_sightlines, build_sightlines
+from .absorption_helpers import LOS_AXIS_IDX, SampleEntries, SightlineParams, SightlineParticles, Sightlines
+from .sightlines import (
+    assemble_sightline_particles,
+    build_random_sightlines,
+    build_sightline_grid,
+    build_sightlines,
+    find_overlaps,
+)
 
 logger = get_logger()
 
+KERNEL_SUPPORT_FACTOR: dict[str, float] = {  # gamma
+    "SIMBA": 1.0,  # GIZMO SmoothingLength is the support radius i.e. H = h
+    # "SWIFT-*"; # For SWIFT support radius, H = gamma * h (3.1, https://arxiv.org/html/2305.13380v2)
+}
+WIND_FIELDS: dict[str, str] = {"SIMBA": "DelayTime"}  # check for any SWIFT fields which are non-zero for wind
+SIGHTLINE_CELLS_PER_STRIDE: int = 512  # cell width = boxsize / SIGHTLINE_CELLS_PER_STRIDE
 
-def run_absorption(*, config: OctaviusConfig, catalogue_path: Path | None = None) -> list[Sightlines]:
+
+def run_absorption(
+    *, config: OctaviusConfig, catalogue_path: Path | None = None
+) -> list[tuple[Sightlines, SightlineParticles]]:
     """
 
     Gets a galaxy sample, prepares sightlines, and builds mock absorption spectra
@@ -52,8 +67,9 @@ def run_absorption(*, config: OctaviusConfig, catalogue_path: Path | None = None
 
     Returns
     -----------
-    sightline_sets: list[Sightlines]
-        For SAMPLE mode: one set per projection axis in the sample. RANDOM: a single set.
+    results: list[tuple[Sightlines, SightlineParticles]]
+        One (sightlines, preselected gas) pair per sightline set: per projection axis in SAMPLE mode (X, Y, Z
+        order), a single set in RANDOM mode.
 
     """
     if config.absorption_los_mode == "RANDOM":
@@ -73,12 +89,22 @@ def run_absorption(*, config: OctaviusConfig, catalogue_path: Path | None = None
 
     n_los = sum(s.n_los for s in sightline_sets)
     logger.info(f"Placed {n_los} sightlines ({config.absorption_los_mode} mode) along {len(sightline_sets)} axes.")
-    logger.warning("Gas preselection and spectra are not implemented yet; stopping after sightlines.")  # TODO: C7
 
-    return sightline_sets
+    sightline_particles = _preselect_gas(config=config, sightline_sets=sightline_sets)
+    for sightlines, particles in zip(sightline_sets, sightline_particles):
+        logger.info(
+            f"Axis {'XYZ'[sightlines.los_axis]}: {particles.n_kept:,} gas particles kept "
+            f"({len(particles.los_members):,} particle-sightline pairs) for {sightlines.n_los} sightlines."
+        )
+
+    logger.warning("Spectra are not implemented yet; stopping after gas preselection.")  # TODO: Stage D: Physics
+
+    return list(zip(sightline_sets, sightline_particles))
 
 
-def _sample_sightlines(*, config: OctaviusConfig, catalogue_path: Path | None = None) -> list[Sightlines]:
+def _sample_sightlines(
+    *, config: OctaviusConfig, catalogue_path: Path | None = None
+) -> list[tuple[Sightlines, SightlineParticles]]:
     """
 
     Sample sightlines based on parameters and galaxy indices provided by the user.
@@ -241,3 +267,71 @@ def _read_box_from_snapshot(*, config: OctaviusConfig) -> tuple[float, float, fl
     sim = reader.simulation_attributes
     hubble = (sim.Hz * u.km / u.s / u.Mpc).to(u.km / u.s / u.kpc).value
     return float(sim.boxsize), float(sim.scale_factor), float(hubble)
+
+
+def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) -> list[SightlineParticles]:
+    """
+
+    Streams pos and smoothing_length for ALL gas in contiguous chunks through the reader's serial subset path.
+
+    Each chunk is read once once and tested against every sightline set's grid.
+
+    Experimental and likely deprecated in the future if more efficient method is found.
+
+    """
+    sim_type = config.simulation_type
+    if sim_type not in KERNEL_SUPPORT_FACTOR:
+        raise NotImplementedError(f"Kernel support factor for '{sim_type} not verified yet.")
+    support_factor = KERNEL_SUPPORT_FACTOR[sim_type]
+
+    reader = build_reader(
+        snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
+    )
+    n_gas = reader.particle_counts["gas"]
+    gas_group = reader.inverse_ptype_map["gas"]
+    grids = [
+        build_sightline_grid(sightlines=s, cell_width=s.boxsize / SIGHTLINE_CELLS_PER_STRIDE) for s in sightline_sets
+    ]
+
+    particle_chunks: list[list[np.ndarray]] = [[] for _ in sightline_sets]
+    los_chunks: list[list[np.ndarray]] = [[] for _ in sightline_sets]
+
+    # read in the data
+    with h5py.File(config.snapshot_path, "r") as snapshot:
+        wind_field = WIND_FIELDS.get(sim_type) if config.absorption_exclude_winds else None
+        if config.absorption_exclude_winds and wind_field is None:
+            logger.warning(f"No wind field known for '{sim_type}'; wind particles will not be excluded.")
+        if wind_field is not None and wind_field not in snapshot[gas_group]:
+            logger.warning(f"No '{wind_field}' in the snapshot; wind particles will not be excluded.")
+            wind_field = None
+
+        for start in range(0, n_gas, config.absorption_chunk_size):  # process chunks, VERY experimental
+            stop = min(start + config.absorption_chunk_size, n_gas)
+            chunk_idx = np.arange(start, stop, dtype=np.int64)
+            columns = reader.read_requested_columns(  # get the position
+                ptype="gas", datasets=["pos", "smoothing_length"], sorted_snapshot_indices=chunk_idx
+            )
+            support = columns["smoothing_length"] * support_factor  # get the support radius
+            if wind_field is not None:
+                support[snapshot[gas_group][wind_field][start:stop] != 0] = 0.0  # mask out the winds
+
+            for k, (sightlines, grid) in enumerate(zip(sightline_sets, grids)):
+                # find particles where the sightline overlaps the particle within its support radius
+                rows, los_idx = find_overlaps(
+                    part_pos=columns["pos"],
+                    support=support,
+                    grid=grid,
+                    los_axis=sightlines.los_axis,
+                    boxsize=sightlines.boxsize,
+                )
+                particle_chunks[k].append(chunk_idx[rows])
+                los_chunks[k].append(los_idx)
+
+            logger.debug("Gas preselection: {stop:,} / {n_gas:,} particles covered.")
+
+    return [
+        assemble_sightline_particles(
+            particle_idx_chunks=particle_chunks[k], los_idx_chunks=los_chunks[k], n_los=s.n_los
+        )
+        for k, s in enumerate(sightline_sets)
+    ]
