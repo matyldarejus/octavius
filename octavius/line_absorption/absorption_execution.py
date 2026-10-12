@@ -11,6 +11,11 @@ Then, builds sightlines:
 - relative to galaxies (based on impact parameters + azimuth angles),
 - randomly (random nlos across the whole box).
 
+Then, preselect particles lying on the said sightlines (see description in sightlines.py).
+
+NOTE: Currently, particle preselection is unconfirmed to work with Kiara-SWIFT snapshots.
+NOTE: Calculations rely on kernel_gamma reported by snapshot's metadata being correct.
+
 """
 
 from typing import TYPE_CHECKING
@@ -42,12 +47,11 @@ from .sightlines import (
 
 logger = get_logger()
 
-KERNEL_SUPPORT_FACTOR: dict[str, float] = {  # gamma
+KERNEL_SUPPORT_FACTOR: dict[str, float] = {  # look up for SWIFT
     "SIMBA": 1.0,  # GIZMO SmoothingLength is the support radius i.e. H = h
-    # "SWIFT-*"; # For SWIFT support radius, H = gamma * h (3.1, https://arxiv.org/html/2305.13380v2)
 }
 WIND_FIELDS: dict[str, str] = {"SIMBA": "DelayTime"}  # check for any SWIFT fields which are non-zero for wind
-SIGHTLINE_CELLS_PER_STRIDE: int = 512  # cell width = boxsize / SIGHTLINE_CELLS_PER_STRIDE
+SIGHTLINE_CELLS_PER_STRIDE: int = 256  # cell width = boxsize / SIGHTLINE_CELLS_PER_STRIDE
 
 
 def run_absorption(
@@ -280,9 +284,6 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
 
     """
     sim_type = config.simulation_type
-    if sim_type not in KERNEL_SUPPORT_FACTOR:
-        raise NotImplementedError(f"Kernel support factor for '{sim_type} not verified yet.")
-    support_factor = KERNEL_SUPPORT_FACTOR[sim_type]
 
     reader = build_reader(
         snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
@@ -311,6 +312,7 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
             columns = reader.read_requested_columns(  # get the position
                 ptype="gas", datasets=["pos", "smoothing_length"], sorted_snapshot_indices=chunk_idx
             )
+            support_factor = _kernel_support_factor(snapshot=snapshot, sim_type=sim_type)  # get the support factor
             support = columns["smoothing_length"] * support_factor  # get the support radius
             if wind_field is not None:
                 support[snapshot[gas_group][wind_field][start:stop] != 0] = 0.0  # mask out the winds
@@ -327,7 +329,7 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
                 particle_chunks[k].append(chunk_idx[rows])
                 los_chunks[k].append(los_idx)
 
-            logger.debug("Gas preselection: {stop:,} / {n_gas:,} particles covered.")
+            logger.debug(f"Gas preselection: {stop:,} / {n_gas:,} particles covered.")
 
     return [
         assemble_sightline_particles(
@@ -335,3 +337,30 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
         )
         for k, s in enumerate(sightline_sets)
     ]
+
+
+def _kernel_support_factor(*, snapshot: h5py.File, sim_type: str) -> float:
+    """
+
+    Checks the kernel support radius factor for SWIFT following convention in Dehnen & Aly 2012.
+
+
+    SWIFT records this in HydroScheme/"Kernel gamma", where then:
+
+        support radius = kernel gamma * h
+
+    """
+    hydro = snapshot.get("HydroScheme")
+    if hydro is not None and "Kernel gamma" in hydro.attrs:
+        support_factor = float(np.atleast_1d(hydro.attrs["Kernel gamma"])[0])  # SWIFT stores this as float32 array
+        kernel_name = hydro.attrs.get("Kernel function", "Unknown kernel")  # fallback if not reported
+        if isinstance(kernel_name, bytes):
+            kernel_name = kernel_name.decode()
+        return support_factor
+
+    if sim_type in KERNEL_SUPPORT_FACTOR:
+        return KERNEL_SUPPORT_FACTOR[sim_type]
+
+    raise NotImplementedError(
+        f"No kernel support factor for '{sim_type}': not found in KERNEL_SUPPORT_FACTOR or snapshot metadata."
+    )

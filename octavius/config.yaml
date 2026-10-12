@@ -76,7 +76,7 @@ line_absorption:
   absorption_los_axis:        Z                             # x, y, z
   # gas preselection
   absorption_exclude_winds:   true        # drop decoupled wind particles (Simba: DelayTime != 0)
-  absorption_chunk_size:      4000000     # gas particles per streamed read, need testing
+  absorption_chunk_size:      2500000     # gas particles per streamed read
 
 
 parallelism:

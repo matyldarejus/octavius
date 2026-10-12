@@ -19,6 +19,7 @@ import pytest
 from octavius.data_management.conventions import OctaviusConfig
 from octavius.line_absorption import run_absorption
 from octavius.line_absorption.absorption_execution import (
+    _kernel_support_factor,
     prepare_sightline_params,
     read_sample_file,
     require_finite_r200c,
@@ -342,6 +343,37 @@ def test_csr_maps_back_to_brute_force():
     rebuilt = {(p, s) for s in range(sightlines.n_los) for p in members(particles, s)}
     assert rebuilt == reference
     assert np.all(np.diff(particles.particle_idx) > 0)
+
+
+def write_hydro_snapshot(path: Path, **attrs) -> Path:
+    with h5py.File(path, "w") as f:
+        if attrs:
+            group = f.create_group("HydroScheme")
+            for key, value in attrs.items():
+                group.attrs[key] = value
+    return path
+
+
+def test_kernel_support_factor_read_from_swift_metadata(tmp_path):
+    path = write_hydro_snapshot(
+        tmp_path / "swift.hdf5",
+        **{"Kernel gamma": np.array([1.93649], dtype=np.float32), "Kernel function": "Wendland C2"},
+    )
+    with h5py.File(path, "r") as snapshot:
+        assert _kernel_support_factor(snapshot=snapshot, sim_type="SWIFT-KIARA") == pytest.approx(1.93649, rel=1e-6)
+
+
+def test_kernel_support_factor_falls_back_for_simba(tmp_path):
+    with h5py.File(write_hydro_snapshot(tmp_path / "simba.hdf5"), "r") as snapshot:  # no HydroScheme group
+        assert _kernel_support_factor(snapshot=snapshot, sim_type="SIMBA") == 1.0
+
+
+def test_kernel_support_factor_raises_when_unknown(tmp_path):
+    with (
+        h5py.File(write_hydro_snapshot(tmp_path / "unknown.hdf5"), "r") as snapshot,
+        pytest.raises(NotImplementedError),
+    ):
+        _kernel_support_factor(snapshot=snapshot, sim_type="GILGAMESH")
 
 
 # standalone run_absorption on a pipeline-built test catalogue
