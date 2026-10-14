@@ -6,6 +6,7 @@ Tests the line absorption module.
 
 # default libraries
 from dataclasses import replace
+from itertools import pairwise
 from pathlib import Path
 
 # other packages
@@ -14,6 +15,7 @@ import numpy as np
 
 # testing
 import pytest
+from scipy.special import wofz
 
 # internal imports
 from octavius.data_management.conventions import OctaviusConfig
@@ -25,6 +27,14 @@ from octavius.line_absorption.absorption_execution import (
     require_finite_r200c,
 )
 from octavius.line_absorption.absorption_helpers import SightlineParams, SightlineParticles, Sightlines, plane_axes
+from octavius.line_absorption.line_profiles import (
+    gaussian,
+    gaussian_bin_integral,
+    line_constants,
+    load_line_table,
+    voigt,
+    voigt_bin_integral,
+)
 from octavius.line_absorption.sightlines import (
     assemble_sightline_particles,
     build_random_sightlines,
@@ -446,3 +456,63 @@ def test_run_absorption_random_mode_needs_no_sample(absorption_run):
     assert sightlines.n_los == 50
     assert sightlines.los_axis == {"X": 0, "Y": 1, "Z": 2}[config.absorption_los_axis]
     assert len(particles.los_offsets) == 51
+
+
+# line data and profiles
+
+
+def reference_voigt(v, b, gamma):
+    """Exact Voigt profile via the Faddeeva function (same definition as pygad)."""
+    return np.real(wofz((v + 1j * gamma) / b)) / (b * np.sqrt(np.pi))
+
+
+def test_line_table_has_every_line_and_known_values():
+    lines = load_line_table()
+    assert len(lines) == 52  # 49 transitions + Lyman_alpha/beta/gamma aliases
+    assert lines["OVI1031"].wavelength == pytest.approx(1031.912)
+    assert lines["OVI1031"].element == "O" and lines["OVI1031"].ion == "OVI"
+    assert lines["HeII"].A_ki == 0.0  # no damping constant given
+
+
+def test_line_constants_lyman_alpha():
+    constants = line_constants(transition=load_line_table()["H1215"])
+    assert constants.b_0 * np.sqrt(1e4) == pytest.approx(12.85, rel=1e-2)  # b(H, 1e4 K) --> 2.85 km/s
+    assert constants.xsec == pytest.approx(0.41641 * 0.026540 * 1215.6701e-13, rel=1e-3)  # f * pi e^2/(m_e c) * lambda
+    assert constants.gamma == pytest.approx(4.6986e8 * 1215.6701e-13 / (4 * np.pi), rel=1e-6)
+
+
+@pytest.mark.parametrize("a", [1e-5, 1e-4, 1e-3, 1e-2])
+def test_voigt_matches_faddeeva(a):
+    b = 10.0
+    v = np.linspace(-200.0, 200.0, 4001)
+    ours = np.array([voigt(x, b, a * b) for x in v])
+    exact = reference_voigt(v, b, a * b)
+    assert np.max(np.abs(ours - exact)) < 0.1 * a * exact.max()
+
+
+def test_voigt_small_x_branch_is_continuous():
+    b, gamma = 10.0, 0.01
+    x_edge = np.sqrt(1e-4) * b  # where the series branch switches over
+    assert voigt(x_edge * (1 - 1e-6), b, gamma) == pytest.approx(voigt(x_edge * (1 + 1e-6), b, gamma), rel=1e-6)
+
+
+def test_voigt_reduces_to_gaussian():
+    assert voigt(3.0, 10.0, 0.0) == pytest.approx(gaussian(3.0, 10.0))
+
+
+def test_profiles_integrate_to_one():
+    b, gamma = 10.0, 0.05
+    edges = np.linspace(-500.0, 500.0, 2001)
+    gauss_total = sum(gaussian_bin_integral(lo, hi, b) for lo, hi in pairwise(edges))
+    voigt_total = sum(voigt_bin_integral(lo, hi, b, gamma, 10) for lo, hi in pairwise(edges))
+    assert gauss_total == pytest.approx(1.0, abs=1e-10)
+    assert voigt_total == pytest.approx(1.0, abs=1e-3)  # Lorentzian wings beyond +-500 km/s are missing
+
+
+def test_gaussian_matches_voigt_limit_and_has_unit_area():
+    b = 10.0
+    v = np.linspace(-100.0, 100.0, 20001)
+    phi = np.array([gaussian(x, b) for x in v])
+    assert np.trapezoid(phi, v) == pytest.approx(1.0, rel=1e-8)
+    assert gaussian(0.0, b) == pytest.approx(1.0 / (b * np.sqrt(np.pi)))
+    assert gaussian(b, b) == pytest.approx(np.exp(-1.0) / (b * np.sqrt(np.pi)))

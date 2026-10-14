@@ -47,10 +47,17 @@ from .sightlines import (
 
 logger = get_logger()
 
+# NOTE: currently no support for TNG
 KERNEL_SUPPORT_FACTOR: dict[str, float] = {  # look up for SWIFT
     "SIMBA": 1.0,  # GIZMO SmoothingLength is the support radius i.e. H = h
 }
-WIND_FIELDS: dict[str, str] = {"SIMBA": "DelayTime"}  # check for any SWIFT fields which are non-zero for wind
+
+# NOTE: EAGLE has no winds as feedback doesn't decouple particles
+# NOTE: COLIBRE has kinetic feedback, but no winds
+WIND_FIELDS: dict[str, str] = {
+    "SIMBA": "DelayTime",
+    "SWIFT-KIARA": "DecouplingDelayTimes",
+}
 SIGHTLINE_CELLS_PER_STRIDE: int = 256  # cell width = boxsize / SIGHTLINE_CELLS_PER_STRIDE
 
 
@@ -315,7 +322,7 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
             support_factor = _kernel_support_factor(snapshot=snapshot, sim_type=sim_type)  # get the support factor
             support = columns["smoothing_length"] * support_factor  # get the support radius
             if wind_field is not None:
-                support[snapshot[gas_group][wind_field][start:stop] != 0] = 0.0  # mask out the winds
+                support[snapshot[gas_group][wind_field][start:stop] > 0] = 0.0  # mask out the winds
 
             for k, (sightlines, grid) in enumerate(zip(sightline_sets, grids)):
                 # find particles where the sightline overlaps the particle within its support radius

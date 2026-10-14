@@ -31,6 +31,21 @@ SightlineGrid = namedtuple(
 )
 
 
+# one absorption transition, as read from line_data.csv
+Transition = namedtuple("Transition", ["name", "ion", "element", "wavelength", "f", "atomic_weight", "A_ki"])
+
+
+# per-transition constants for njit
+LineConstants = namedtuple(
+    "LineConstants",
+    [
+        "xsec",  # cm^2 km/s: integrated cross-section
+        "b_0",  # km/s: thermal Doppler parameter at T = 1 K
+        "gamma",  # km/s: natural damping wdith
+    ],
+)
+
+
 def plane_axes(*, los_axis: int) -> tuple[int, int]:
     """
 
