@@ -15,18 +15,30 @@ import numpy as np
 
 # testing
 import pytest
+from scipy.integrate import quad
 from scipy.special import wofz
 
 # internal imports
 from octavius.data_management.conventions import OctaviusConfig
 from octavius.line_absorption import run_absorption
+from octavius.line_absorption.absorption_computations import (
+    build_projected_kernel_table,
+    kernel_3d,
+    projected_kernel,
+)
 from octavius.line_absorption.absorption_execution import (
     _kernel_support_factor,
     prepare_sightline_params,
     read_sample_file,
     require_finite_r200c,
 )
-from octavius.line_absorption.absorption_helpers import SightlineParams, SightlineParticles, Sightlines, plane_axes
+from octavius.line_absorption.absorption_helpers import (
+    KERNEL_IDX,
+    SightlineParams,
+    SightlineParticles,
+    Sightlines,
+    plane_axes,
+)
 from octavius.line_absorption.line_profiles import (
     gaussian,
     gaussian_bin_integral,
@@ -516,3 +528,44 @@ def test_gaussian_matches_voigt_limit_and_has_unit_area():
     assert np.trapezoid(phi, v) == pytest.approx(1.0, rel=1e-8)
     assert gaussian(0.0, b) == pytest.approx(1.0 / (b * np.sqrt(np.pi)))
     assert gaussian(b, b) == pytest.approx(np.exp(-1.0) / (b * np.sqrt(np.pi)))
+
+
+# projected kernels
+
+
+@pytest.fixture(scope="module", params=list(KERNEL_IDX.values()), ids=list(KERNEL_IDX))
+def kernel_table(request):
+    return request.param, build_projected_kernel_table(request.param)
+
+
+@pytest.mark.parametrize("kernel_id", list(KERNEL_IDX.values()))
+def test_kernel_3d_has_unit_volume(kernel_id):
+    volume, _ = quad(lambda q: 4.0 * np.pi * q * q * kernel_3d(q, kernel_id), 0.0, 1.0, points=[0.5])
+    assert volume == pytest.approx(1.0, rel=1e-10)
+
+
+def test_projected_kernel_has_unit_area(kernel_table):
+    _, table = kernel_table
+    s = np.linspace(0.0, 1.0, len(table))
+    assert np.trapezoid(2.0 * np.pi * s * table, s) == pytest.approx(1.0, rel=1e-5)
+
+
+def test_projected_kernel_centre_values():
+    assert build_projected_kernel_table(KERNEL_IDX["CUBIC"])[0] == pytest.approx(6.0 / np.pi, rel=1e-8)
+    assert build_projected_kernel_table(KERNEL_IDX["WENDLAND_C2"])[0] == pytest.approx(7.0 / np.pi, rel=1e-8)
+
+
+@pytest.mark.parametrize("s", [0.1, 0.3, 0.55, 0.75, 0.9])
+def test_projected_kernel_matches_quad(kernel_table, s):
+    kernel_id, table = kernel_table
+    z_max = np.sqrt(1.0 - s * s)
+    points = [np.sqrt(0.25 - s * s)] if s < 0.5 else None  # cubic piece boundary at q = 0.5
+    exact, _ = quad(lambda z: 2.0 * kernel_3d(np.sqrt(s * s + z * z), kernel_id), 0.0, z_max, points=points)
+    assert projected_kernel(s, table) == pytest.approx(exact, rel=1e-5, abs=1e-7)
+
+
+def test_projected_kernel_is_monotonic_and_compact(kernel_table):
+    _, table = kernel_table
+    assert np.all(np.diff(table) <= 0.0)
+    assert table[-1] == 0.0
+    assert projected_kernel(1.0, table) == 0.0 and projected_kernel(1.5, table) == 0.0

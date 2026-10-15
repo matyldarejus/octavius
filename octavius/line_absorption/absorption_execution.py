@@ -349,7 +349,8 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
 def _kernel_support_factor(*, snapshot: h5py.File, sim_type: str) -> float:
     """
 
-    Checks the kernel support radius factor for SWIFT following convention in Dehnen & Aly 2012.
+    Checks the kernel support radius factor for SWIFT following convention
+    in Dehnen & Aly (2012) (doi: 10.1111/j.1365-2966.2012.21439.x).
 
 
     SWIFT records this in HydroScheme/"Kernel gamma", where then:

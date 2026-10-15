@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 LOS_AXIS_IDX: dict[str, int] = {"X": 0, "Y": 1, "Z": 2}
+KERNEL_IDX = {"CUBIC": 0, "WENDLAND_C2": 2}
 
 SightlineGrid = namedtuple(
     "SightlineGrid",

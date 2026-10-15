@@ -6,11 +6,10 @@ Line data and normalised line profiles.
     - Profiles are normalised to unit integral over velocity:
         1. Gaussian (thermal + turbulent broadening, Doppler parameter b).
         2. Lorentzian (natural broadening, gamma).
-        3. Voigt - done via the Tepper-Garcia (2006) approximation to the Voigt-Hjerting function.
+        3. Voigt - done via the Tepper-Garcia (2006) (doi: 10.1111/j.1365-2966.2006.10450.x) approximation
+            to the Voigt-Hjerting function.
     - Bin integrals give the fraction of a profile falling in the velocity bin, which the optical-depth
     synthesis adds up per particle.
-
-TODO next: Decide how many steps to use for voigt profile integral.
 
 """
 
@@ -154,7 +153,7 @@ def voigt_bin_integral(v0, v1, b, gamma, n_steps):
 
     Integral of the Voigt profile over [v0, v1] using Simpson's rule with n_steps sub-intervals.
 
-    No elementary integral function, so analytic solution is needed.
+    No elementary integral function, so numerical solution is needed.
 
     """
     h = (v1 - v0) / n_steps
