@@ -70,7 +70,7 @@ Documentation = "https://octavius.readthedocs.io/"
 [tool.setuptools.packages.find]
 include = ["octavius*"]
 [tool.setuptools.package-data]
-octavius = ["*.yaml", "line_absorption/data/*.csv"]
+octavius = ["*.yaml", "line_absorption/*.csv"]
 [tool.setuptools.dynamic]
 version = {attr = "octavius.version.__version__"}
 
