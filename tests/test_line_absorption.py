@@ -15,6 +15,7 @@ import numpy as np
 
 # testing
 import pytest
+from astropy import units as u
 from scipy.integrate import quad
 from scipy.special import wofz
 
@@ -24,7 +25,9 @@ from octavius.line_absorption import run_absorption
 from octavius.line_absorption.absorption_computations import (
     build_projected_kernel_table,
     kernel_3d,
+    optical_depth,
     projected_kernel,
+    velocity_grid,
 )
 from octavius.line_absorption.absorption_execution import (
     _kernel_support_factor,
@@ -569,3 +572,162 @@ def test_projected_kernel_is_monotonic_and_compact(kernel_table):
     assert np.all(np.diff(table) <= 0.0)
     assert table[-1] == 0.0
     assert projected_kernel(1.0, table) == 0.0 and projected_kernel(1.5, table) == 0.0
+
+
+# optical depth / tau synthesis
+
+# set reused variables
+KPC_CM = (1.0 * u.kpc).to(u.cm).value
+OVI = line_constants(transition=load_line_table()["OVI1031"])
+LYA = line_constants(transition=load_line_table()["H1215"])
+CUBIC_TABLE = build_projected_kernel_table(KERNEL_IDX["CUBIC"])
+
+
+def one_particle_spectrum(*, line, column, b, v=500.25, vbox=1000.0, pixel=0.5, s=0.0, weights=None):
+    """
+
+    Sets simplest possible system as a test case.
+    One particle (H = 1 kpc, a = 1) seen by one sightline; column is its value at s = 0.
+
+    """
+    n_bins, dv = velocity_grid(vbox=vbox, pixel_kms=pixel)
+    n_ion = column * KPC_CM**2 / CUBIC_TABLE[0]
+    w = np.zeros((1, 0)) if weights is None else np.atleast_2d(weights)
+    tau, weighted, member_column = optical_depth(
+        np.array([0.0]),
+        np.array([0.0]),
+        np.array([0, 1]),
+        np.array([0]),
+        np.array([s]),
+        np.array([0.0]),
+        np.array([1.0]),
+        np.array([n_ion]),
+        np.array([v]),
+        np.array([b]),
+        w,
+        10_000.0,
+        KPC_CM,
+        n_bins,
+        dv,
+        line,
+        CUBIC_TABLE,
+    )
+    v_centres = (np.arange(n_bins) + 0.5) * dv
+    return v_centres, dv, tau[0], weighted[0], member_column[0]
+
+
+def test_tau_integral_equals_xsec_times_column():
+    line = OVI._replace(gamma=0.0)
+    _, dv, tau, _, column = one_particle_spectrum(line=line, column=1e13, b=20.0)
+    assert column == pytest.approx(1e13, rel=1e-12)
+    assert tau.sum() * dv == pytest.approx(line.xsec * 1e13, rel=1e-12)
+
+
+def test_column_follows_projected_kernel():
+    _, _, _, _, column = one_particle_spectrum(line=OVI, column=1e13, b=20.0, s=0.5)
+    assert column == pytest.approx(1e13 * projected_kernel(0.5, CUBIC_TABLE) / CUBIC_TABLE[0], rel=1e-12)
+
+
+def test_line_centre_and_width():
+    line = OVI._replace(gamma=0.0)
+    v, dv, tau, _, _ = one_particle_spectrum(line=line, column=1e13, b=20.0, pixel=0.1)
+    mean = np.sum(v * tau) / tau.sum()
+    var = np.sum((v - mean) ** 2 * tau) / tau.sum()
+    assert mean == pytest.approx(500.25, abs=1e-9)
+    # b^2 / 2 plus Sheppard's correction for binned data
+    assert var == pytest.approx(20.0**2 / 2 + dv**2 / 12, rel=1e-6)
+
+
+def test_line_centre_optical_depth_matches_standard_formula():
+    t = load_line_table()["OVI1031"]
+    line = OVI._replace(gamma=0.0)
+    _, _, tau, _, _ = one_particle_spectrum(line=line, column=1e13, b=20.0, v=500.025, pixel=0.05)
+    tau_0 = 1.497e-15 * t.f * t.wavelength * 1e13 / 20.0  # Morton (2003)
+    assert tau.max() == pytest.approx(tau_0, rel=1e-3)
+
+
+def test_periodic_wrap_is_symmetric_and_translation_invariant():
+    line = OVI._replace(gamma=0.0)
+    _, dv, tau_mid, _, _ = one_particle_spectrum(line=line, column=1e13, b=20.0, v=500.25)
+    _, _, tau_edge, _, _ = one_particle_spectrum(line=line, column=1e13, b=20.0, v=0.25)  # centre of pixel 0
+    np.testing.assert_allclose(tau_edge[1:], tau_edge[:0:-1], rtol=1e-12)  # symmetric across the wrap
+    np.testing.assert_allclose(tau_edge, np.roll(tau_mid, -round(500.0 / dv)), rtol=1e-12, atol=1e-30)
+    assert tau_edge.sum() == pytest.approx(tau_mid.sum(), rel=1e-12)
+
+
+def test_damping_wing_truncation_loss():
+    column, b = 1e15, 20.0
+    v, dv, tau, _, _ = one_particle_spectrum(line=LYA, column=column, b=b, vbox=10_000.0)
+    half_width = np.sqrt(LYA.xsec * column * LYA.gamma / (np.pi * 1e-6))
+    deficit = 1.0 - tau.sum() * dv / (LYA.xsec * column)
+    offset = np.mod(v - 500.25 + 5000.0, 10_000.0) - 5000.0  # nearest image
+    assert deficit == pytest.approx(2.0 * LYA.gamma / (np.pi * half_width), abs=1e-4)
+    assert np.all(tau[np.abs(offset) > half_width + dv] == 0.0)
+
+
+def test_minimum_image_in_plane():
+    n_bins, dv = velocity_grid(vbox=1000.0, pixel_kms=0.5)
+    args = (np.array([0, 1]), np.array([0]))
+    _, _, col_wrapped = optical_depth(
+        np.array([0.0]),
+        np.array([0.0]),
+        *args,
+        np.array([10_000.0 - 0.3]),
+        np.array([0.0]),
+        np.array([1.0]),
+        np.array([1e60]),
+        np.array([500.25]),
+        np.array([20.0]),
+        np.zeros((1, 0)),
+        10_000.0,
+        KPC_CM,
+        n_bins,
+        dv,
+        OVI,
+        CUBIC_TABLE,
+    )
+    _, _, col_direct = optical_depth(
+        np.array([0.0]),
+        np.array([0.0]),
+        *args,
+        np.array([0.3]),
+        np.array([0.0]),
+        np.array([1.0]),
+        np.array([1e60]),
+        np.array([500.25]),
+        np.array([20.0]),
+        np.zeros((1, 0)),
+        10_000.0,
+        KPC_CM,
+        n_bins,
+        dv,
+        OVI,
+        CUBIC_TABLE,
+    )
+    assert col_wrapped[0] == pytest.approx(col_direct[0], rel=1e-9) and col_direct[0] > 0.0
+
+
+def test_tau_weighted_extras():
+    _, _, tau, weighted, _ = one_particle_spectrum(line=OVI, column=1e13, b=20.0, weights=[[1e4, 0.5]])
+    has_tau = tau > 0.0
+    np.testing.assert_allclose(weighted[0, has_tau], 1e4, rtol=1e-12)
+    np.testing.assert_allclose(weighted[1, has_tau], 0.5, rtol=1e-12)
+
+
+@pytest.mark.parametrize("log_column", [13.0, 16.0, 19.0])
+def test_curve_of_growth_matches_faddeeva(log_column):
+    column, b, vbox, v_line = 10.0**log_column, 20.0, 10_000.0, 5000.0
+    v, dv, tau, _, _ = one_particle_spectrum(line=LYA, column=column, b=b, v=v_line, vbox=vbox, pixel=1.0)
+    offset = np.mod(v - v_line + 0.5 * vbox, vbox) - 0.5 * vbox  # nearest image, as in the synthesis
+    tau_ref = LYA.xsec * column * reference_voigt(offset, b, LYA.gamma)
+    ew, ew_ref = np.sum(1.0 - np.exp(-tau)) * dv, np.sum(1.0 - np.exp(-tau_ref)) * dv
+    assert ew == pytest.approx(ew_ref, rel=1e-3)
+
+
+@pytest.mark.parametrize("pixel", [0.25, 1.0, 2.5])
+def test_equivalent_width_converges_with_pixel_size(pixel):
+    line = OVI._replace(gamma=0.0)
+    _, dv_fine, tau_fine, _, _ = one_particle_spectrum(line=line, column=1e15, b=20.0, pixel=0.05)
+    _, dv, tau, _, _ = one_particle_spectrum(line=line, column=1e15, b=20.0, pixel=pixel)
+    ew_fine = np.sum(1.0 - np.exp(-tau_fine)) * dv_fine
+    assert np.sum(1.0 - np.exp(-tau)) * dv == pytest.approx(ew_fine, rel=1e-2)

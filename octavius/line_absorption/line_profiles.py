@@ -61,7 +61,11 @@ def line_constants(*, transition: Transition) -> LineConstants:
 
     Computed once.
 
-    These were sourced from Pygad's absorption_spectra.py file -- TODO: Cross-reference
+    These were sourced from Pygad's absorption_spectra.py file and cross-referenced with
+    Draine (2011) (doi: 10.1515/9781400839087)
+
+        - xsec  - eq. 6.24 in velocity space.
+        - gamma - eq. 6.37 / 2 to get HWHM and converted to velocity space.
 
     """
     wavelength = transition.wavelength * u.AA
@@ -84,6 +88,8 @@ def gaussian(v, b):
 
     Gaussian profie with Doppler parameter b (= sqrt(2) sigma), unit integral over v.
 
+    Eq. 6.38 from Draine (2011).
+
     Returns:
     - phi: profile value (1 / velocity units)
     """
@@ -95,6 +101,8 @@ def lorentzian(v, gamma):
     """
 
     Lorentzian profile with half width at half maximum gamma, unit integral over v.
+
+    Derived from Draine (2011) eq. 6.36 converted to velocity space.
 
     Returns:
         - phi: profile value (1 / velocity units)
@@ -152,8 +160,6 @@ def voigt_bin_integral(v0, v1, b, gamma, n_steps):
     """
 
     Integral of the Voigt profile over [v0, v1] using Simpson's rule with n_steps sub-intervals.
-
-    No elementary integral function, so numerical solution is needed.
 
     """
     h = (v1 - v0) / n_steps
