@@ -32,15 +32,18 @@ from octavius.line_absorption.absorption_computations import (
 )
 from octavius.line_absorption.absorption_execution import (
     _kernel_support_factor,
+    _read_gas_properties,
     prepare_sightline_params,
     read_sample_file,
     require_finite_r200c,
 )
 from octavius.line_absorption.absorption_helpers import (
+    GAS_LAYOUTS,
     KERNEL_IDX,
     SightlineParams,
     SightlineParticles,
     Sightlines,
+    detect_gas_layout,
     plane_axes,
 )
 from octavius.line_absorption.ion_tables import (
@@ -396,20 +399,21 @@ def test_kernel_support_factor_read_from_swift_metadata(tmp_path):
         **{"Kernel gamma": np.array([1.93649], dtype=np.float32), "Kernel function": "Wendland C2"},
     )
     with h5py.File(path, "r") as snapshot:
-        assert _kernel_support_factor(snapshot=snapshot, sim_type="SWIFT-KIARA") == pytest.approx(1.93649, rel=1e-6)
+        factor = _kernel_support_factor(snapshot=snapshot, layout=GAS_LAYOUTS["SWIFT-KIARA"])
+    assert factor == pytest.approx(1.93649, rel=1e-6)
 
 
-def test_kernel_support_factor_falls_back_for_simba(tmp_path):
+def test_kernel_support_factor_falls_back_to_layout(tmp_path):
     with h5py.File(write_hydro_snapshot(tmp_path / "simba.hdf5"), "r") as snapshot:  # no HydroScheme group
-        assert _kernel_support_factor(snapshot=snapshot, sim_type="SIMBA") == 1.0
+        assert _kernel_support_factor(snapshot=snapshot, layout=GAS_LAYOUTS["SIMBA"]) == 1.0
 
 
-def test_kernel_support_factor_raises_when_unknown(tmp_path):
+def test_kernel_support_factor_raises_without_metadata(tmp_path):
     with (
-        h5py.File(write_hydro_snapshot(tmp_path / "unknown.hdf5"), "r") as snapshot,
-        pytest.raises(NotImplementedError),
+        h5py.File(write_hydro_snapshot(tmp_path / "kiara.hdf5"), "r") as snapshot,
+        pytest.raises(NotImplementedError, match="SWIFT-KIARA"),
     ):
-        _kernel_support_factor(snapshot=snapshot, sim_type="GILGAMESH")
+        _kernel_support_factor(snapshot=snapshot, layout=GAS_LAYOUTS["SWIFT-KIARA"])  # SWIFT layout, no metadata
 
 
 # standalone run_absorption on a pipeline-built test catalogue
@@ -482,6 +486,23 @@ def test_run_absorption_random_mode_needs_no_sample(absorption_run):
     assert sightlines.n_los == 50
     assert sightlines.los_axis == {"X": 0, "Y": 1, "Z": 2}[config.absorption_los_axis]
     assert len(particles.los_offsets) == 51
+
+
+def test_second_gas_read_matches_snapshot(absorption_run):
+    _, config = absorption_run
+    with h5py.File(config.snapshot_path, "r") as f:
+        gas, h = f["PartType0"], f["Header"].attrs["HubbleParam"]
+        n_gas = len(gas["Masses"])
+        idx = np.unique(np.r_[0, 1, 2, 3, 40, 45, n_gas // 2, n_gas - 1])  # contiguous run + gaps
+        raw_metals, raw_hsml = gas["Metallicity"][idx], gas["SmoothingLength"][idx]
+
+    props = _read_gas_properties(config=config, particle_idx=idx, layout=GAS_LAYOUTS["SIMBA"])
+
+    assert set(props) == {"pos", "vel", "smoothing_length", "rho", "mass", "temperature", "metals"}
+    assert all(len(values) == len(idx) for values in props.values())
+    np.testing.assert_array_equal(props["metals"], raw_metals)
+    np.testing.assert_allclose(props["smoothing_length"], raw_hsml / h, rtol=1e-6)  # kpc a / h -> kpc a
+    assert np.all(props["temperature"] > 0.0) and np.all(props["rho"] > 0.0)
 
 
 # line data and profiles
@@ -901,3 +922,33 @@ def test_self_shielding_limits_and_characteristic_density(uvb, gamma_0, sigma_0)
     assert f[2] == 1e-3  # floored in dense gas
     hot = self_shielding_factor(n_H=np.array([n_ss * 10.0**0.17]), T=np.array([1e5]), redshift=0.0, uvb=uvb)
     assert hot[0] == pytest.approx(f_at_n_ss, rel=1e-12)  # n_H,ss scales as T^0.17
+
+
+# gas layouts
+
+
+def test_simba_and_simba_c_are_told_apart_by_metal_columns():
+    simba = detect_gas_layout(simulation_type="SIMBA", n_metal_columns=11)
+    simba_c = detect_gas_layout(simulation_type="SIMBA", n_metal_columns=34)
+    assert simba.name == "SIMBA" and not simba.stores_hydrogen
+    assert (simba.column("Z"), simba.column("He"), simba.column("O"), simba.column("Fe")) == (0, 1, 4, 10)
+    assert simba_c.name == "SIMBA-C" and simba_c.stores_hydrogen
+    assert (simba_c.column("H"), simba_c.column("He"), simba_c.column("O"), simba_c.column("Fe")) == (1, 2, 8, 26)
+
+
+def test_unknown_layouts_and_untracked_elements_raise():
+    with pytest.raises(NotImplementedError, match="20 Metallicity columns"):
+        detect_gas_layout(simulation_type="SIMBA", n_metal_columns=20)
+    with pytest.raises(NotImplementedError, match="TNG"):
+        detect_gas_layout(simulation_type="TNG", n_metal_columns=None)
+    with pytest.raises(KeyError, match="Al"):
+        GAS_LAYOUTS["SIMBA"].column("Al")
+
+
+@pytest.mark.parametrize("name", ["SIMBA", "SIMBA-C"])
+def test_every_line_element_is_available(name):
+    layout = GAS_LAYOUTS[name]
+    for element in {t.element for t in load_line_table().values()}:
+        if element == "H" and not layout.stores_hydrogen:
+            continue  # Simba: X_H = 1 - Y - Z, no column needed
+        layout.column(element)  # KeyError if a line's element is missing

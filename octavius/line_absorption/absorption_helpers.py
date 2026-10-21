@@ -47,6 +47,45 @@ LineConstants = namedtuple(
 )
 
 
+# element order of the 2D Metallicity dataset (mass fractions); column 0 is total Z
+SIMBA_METAL_COLUMNS = ("Z", "He", "C", "N", "O", "Ne", "Mg", "Si", "S", "Ca", "Fe")  # Dave et al. (2019)
+SIMBA_C_METAL_COLUMNS = (  # Chem5 (Hough et al. (2023))
+    "Z",
+    "H",
+    "He",
+    "Li",
+    "Be",
+    "B",
+    "C",
+    "N",
+    "O",
+    "F",
+    "Ne",
+    "Na",
+    "Mg",
+    "Al",
+    "Si",
+    "P",
+    "S",
+    "Cl",
+    "Ar",
+    "K",
+    "Ca",
+    "Sc",
+    "Ti",
+    "V",
+    "Cr",
+    "Mn",
+    "Fe",
+    "Co",
+    "Ni",
+    "Cu",
+    "Zn",
+    "Ga",
+    "Ge",
+)
+
+
 def plane_axes(*, los_axis: int) -> tuple[int, int]:
     """
 
@@ -131,3 +170,108 @@ class SightlineParticles:
     @property
     def n_kept(self) -> int:
         return len(self.particle_idx)
+
+
+@dataclass(frozen=True, slots=True)
+class GasLayout:
+    """
+
+    Stores information about how a simulation stores its gas. Where a field is None, the
+    information is read from the snapshot's metadata.
+
+    """
+
+    name: str
+    metals_dataset: str  # 2D element mass fractions
+    metal_columns: tuple[str, ...]  # element in each columns
+    wind_field: str | None  # flag for decoupled wind particles
+    support_factor: float | None  # support radius / smoothing length
+    baryon_fraction: float | None  # Omega_b / Omega_m of the run
+    kernel: str | None  # KERNEL_IDX key
+
+    def column(self, element: str) -> int:
+        """
+
+        Returns the metallicity column of an element's mass fraction.
+
+        """
+        if element not in self.metal_columns:
+            raise KeyError(f"{self.name} does not track '{element}' (tracks: {','.join(self.metal_columns[1:])}).")
+        return self.metal_columns.index(element)
+
+    @property
+    def stores_hydrogen(self) -> bool:
+        """
+
+        True if X_H is its own column; otherwise calculate X_H = Y - Z.
+
+        """
+        return "H" in self.metal_columns
+
+
+GAS_LAYOUTS: dict[str, GasLayout] = {
+    "SIMBA": GasLayout(  # Dave et al. (2019)
+        name="SIMBA",
+        metals_dataset="Metallicity",
+        metal_columns=SIMBA_METAL_COLUMNS,
+        wind_field="DelayTime",
+        support_factor=1.0,
+        kernel="CUBIC",
+        baryon_fraction=0.048 / 0.3,  # GIZMO SmoothingLength = support radius
+    ),
+    "SIMBA-C": GasLayout(  # Hough et al. (2023); same cosmology as Simba (CHECK)
+        name="SIMBA-C",
+        metals_dataset="Metallicity",
+        metal_columns=SIMBA_C_METAL_COLUMNS,
+        wind_field="DelayTime",
+        support_factor=1.0,
+        kernel="CUBIC",
+        baryon_fraction=0.048 / 0.3,
+    ),
+    # SWIFT runs: kernel, support and cosmology come from the snapshot; element columns are named in its
+    # ElementMassFractions attributes (to be read in the SWIFT step), so only total Z is listed for now
+    "SWIFT-KIARA": GasLayout(
+        name="SWIFT-KIARA",
+        metals_dataset="ElementMassFractions",
+        metal_columns=("Z",),
+        wind_field="DecouplingDelayTimes",
+        support_factor=None,
+        kernel=None,
+        baryon_fraction=None,
+    ),
+    "SWIFT-EAGLE": GasLayout(  # feedback does not decouple particles: no winds
+        name="SWIFT-EAGLE",
+        metals_dataset="ElementMassFractions",
+        metal_columns=("Z",),
+        wind_field=None,
+        support_factor=None,
+        kernel=None,
+        baryon_fraction=None,
+    ),
+    "SWIFT-COLIBRE": GasLayout(  # kinetic feedback, but no decoupled winds
+        name="SWIFT-COLIBRE",
+        metals_dataset="ElementMassFractions",
+        metal_columns=("Z",),
+        wind_field=None,
+        support_factor=None,
+        kernel=None,
+        baryon_fraction=None,
+    ),
+    # NOTE: TNG is currently unsupported
+}
+
+
+def detect_gas_layout(*, simulation_type: str, n_metal_columns: int | None) -> GasLayout:
+    """
+
+    Returns the gas layout of a snapshot.
+
+    """
+    if simulation_type == "SIMBA":
+        name = {11: "SIMBA", 34: "SIMBA-C"}.get(n_metal_columns)
+        if name is None:
+            raise NotImplementedError(f"SIMBA snapshot with {n_metal_columns} Metallicity columns: unknown layout.")
+        return GAS_LAYOUTS[name]
+    if simulation_type in GAS_LAYOUTS:
+        return GAS_LAYOUTS[simulation_type]
+    raise NotImplementedError(f"No gas layout for '{simulation_type}' (have: {', '.join(GAS_LAYOUTS)}).")

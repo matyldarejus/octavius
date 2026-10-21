@@ -1,20 +1,7 @@
 """
 
-Line absorption execution function.
+Line absorption execution pipeline.
 
-Currently, loads in the galaxy sample file, which requires:
-- catalogue galaxy indices,
-- (optional) galaxy-specific los axis,
-- user-generated bin labels.
-
-Then, builds sightlines:
-- relative to galaxies (based on impact parameters + azimuth angles),
-- randomly (random nlos across the whole box).
-
-Then, preselect particles lying on the said sightlines (see description in sightlines.py).
-
-NOTE: Currently, particle preselection is unconfirmed to work with Kiara-SWIFT snapshots.
-NOTE: Calculations rely on kernel_gamma reported by snapshot's metadata being correct.
 
 """
 
@@ -34,9 +21,18 @@ from astropy import units as u
 
 # internal imports
 from ..data_management import OctaviusConstants, build_reader, output_catalogue_path
+from ..data_management.parallel_reading import generate_read_plan
 from ..log import get_logger
 from ..utils import load_catalogue
-from .absorption_helpers import LOS_AXIS_IDX, SampleEntries, SightlineParams, SightlineParticles, Sightlines
+from .absorption_helpers import (
+    LOS_AXIS_IDX,
+    GasLayout,
+    SampleEntries,
+    SightlineParams,
+    SightlineParticles,
+    Sightlines,
+    detect_gas_layout,
+)
 from .sightlines import (
     assemble_sightline_particles,
     build_random_sightlines,
@@ -47,18 +43,8 @@ from .sightlines import (
 
 logger = get_logger()
 
-# NOTE: currently no support for TNG
-KERNEL_SUPPORT_FACTOR: dict[str, float] = {  # look up for SWIFT
-    "SIMBA": 1.0,  # GIZMO SmoothingLength is the support radius i.e. H = h
-}
-
-# NOTE: EAGLE has no winds as feedback doesn't decouple particles
-# NOTE: COLIBRE has kinetic feedback, but no winds
-WIND_FIELDS: dict[str, str] = {
-    "SIMBA": "DelayTime",
-    "SWIFT-KIARA": "DecouplingDelayTimes",
-}
 SIGHTLINE_CELLS_PER_STRIDE: int = 256  # cell width = boxsize / SIGHTLINE_CELLS_PER_STRIDE
+GAS_PROPERTIES = ["pos", "vel", "smoothing_length", "rho", "mass", "temperature"]  # properties for second gas read
 
 
 def run_absorption(
@@ -108,7 +94,7 @@ def run_absorption(
             f"({len(particles.los_members):,} particle-sightline pairs) for {sightlines.n_los} sightlines."
         )
 
-    logger.warning("Spectra are not implemented yet; stopping after gas preselection.")  # TODO: Stage D: Physics
+    logger.warning("Spectra are not implemented yet; stopping after gas preselection.")
 
     return list(zip(sightline_sets, sightline_particles))
 
@@ -306,7 +292,9 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
 
     # read in the data
     with h5py.File(config.snapshot_path, "r") as snapshot:
-        wind_field = WIND_FIELDS.get(sim_type) if config.absorption_exclude_winds else None
+        layout = _gas_layout(snapshot=snapshot, sim_type=sim_type, gas_group=gas_group)
+        support_factor = _kernel_support_factor(snapshot=snapshot, layout=layout)
+        wind_field = layout.wind_field if config.absorption_exclude_winds else None
         if config.absorption_exclude_winds and wind_field is None:
             logger.warning(f"No wind field known for '{sim_type}'; wind particles will not be excluded.")
         if wind_field is not None and wind_field not in snapshot[gas_group]:
@@ -319,7 +307,6 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
             columns = reader.read_requested_columns(  # get the position
                 ptype="gas", datasets=["pos", "smoothing_length"], sorted_snapshot_indices=chunk_idx
             )
-            support_factor = _kernel_support_factor(snapshot=snapshot, sim_type=sim_type)  # get the support factor
             support = columns["smoothing_length"] * support_factor  # get the support radius
             if wind_field is not None:
                 support[snapshot[gas_group][wind_field][start:stop] > 0] = 0.0  # mask out the winds
@@ -346,7 +333,47 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
     ]
 
 
-def _kernel_support_factor(*, snapshot: h5py.File, sim_type: str) -> float:
+def _read_gas_properties(
+    *, config: OctaviusConfig, particle_idx: np.ndarray, layout: GasLayout
+) -> dict[str, np.ndarray]:
+    """
+
+    Reads in the gas properties for the preselected particles only in a second pass.
+
+    These are all properties as listed in GAS_PROPERTIES.
+
+    """
+    reader = build_reader(
+        snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
+    )
+    gas = reader.read_requested_columns(ptype="gas", datasets=GAS_PROPERTIES, sorted_snapshot_indices=particle_idx)
+
+    with h5py.File(config.snapshot_path, "r") as snapshot:
+        metals = snapshot[reader.inverse_ptype_map["gas"]][layout.metals_dataset]
+        gas["metals"] = np.empty((len(particle_idx), metals.shape[1]), dtype=np.float64)
+        position = 0
+        for read_slice, mask in generate_read_plan(idx_sorted=particle_idx):  # contigous reads
+            chunk = metals[read_slice]
+            if mask is not None:
+                chunk = chunk[mask]
+            gas["metals"][position : position + len(chunk)] = chunk
+            position += len(chunk)
+
+    return gas
+
+
+def _gas_layout(*, snapshot: h5py.File, sim_type: str, gas_group: str) -> GasLayout:
+    """
+
+    Detects and returns the correct gas layout.
+
+    """
+    metals = snapshot[gas_group].get("Metallicity")
+    n_columns = metals.shape[1] if metals is not None and metals.ndim == 2 else None
+    return detect_gas_layout(simulation_type=sim_type, n_metal_columns=n_columns)
+
+
+def _kernel_support_factor(*, snapshot: h5py.File, layout: GasLayout) -> float:
     """
 
     Checks the kernel support radius factor for SWIFT following convention
@@ -360,15 +387,7 @@ def _kernel_support_factor(*, snapshot: h5py.File, sim_type: str) -> float:
     """
     hydro = snapshot.get("HydroScheme")
     if hydro is not None and "Kernel gamma" in hydro.attrs:
-        support_factor = float(np.atleast_1d(hydro.attrs["Kernel gamma"])[0])  # SWIFT stores this as float32 array
-        kernel_name = hydro.attrs.get("Kernel function", "Unknown kernel")  # fallback if not reported
-        if isinstance(kernel_name, bytes):
-            kernel_name = kernel_name.decode()
-        return support_factor
-
-    if sim_type in KERNEL_SUPPORT_FACTOR:
-        return KERNEL_SUPPORT_FACTOR[sim_type]
-
-    raise NotImplementedError(
-        f"No kernel support factor for '{sim_type}': not found in KERNEL_SUPPORT_FACTOR or snapshot metadata."
-    )
+        return float(np.atleast_1d(hydro.attrs["Kernel gamma"])[0])  # SWIFT stores this as float32 array
+    if layout.support_factor is not None:
+        return layout.support_factor
+    raise NotImplementedError(f"No kernel support factor for '{layout.name}': not found in its layout or metadata.")
