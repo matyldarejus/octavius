@@ -55,6 +55,11 @@ def build_reader(snapshot_path: Path, constants: OctaviusConstants, config: Octa
             f"Unsupported simulation type: '{sim_type}', currently support {', '.join(sorted(READER_MAP))}"
         )
 
+    if reader_class is SimbaReader:
+        with h5py.File(snapshot_path, "r") as f:
+            if f["PartType0/Metallicity"].shape[1] == 34:
+                reader_class = SimbaCReader
+
     logger.info(f"Using {sim_type} reader.")
     reader = reader_class(snapshot_path=snapshot_path, constants=constants, n_io_chunks=config.n_io_chunks)
 
@@ -247,6 +252,18 @@ class SimbaReader(GadgetReader):
         mass_H2 = fH2 * gas_mass
 
         return mass_H2
+
+
+class SimbaCReader(SimbaReader):
+    """
+    Simba-C (Chem5) stores 34 Metallicity columns instead of Simba's 11,
+    so helium is column 2, not 1.
+    """
+
+    column_indices = {
+        "helium_fraction": 2,
+        "metallicity": 0,
+    }
 
 
 class TNGReader(GadgetReader):
