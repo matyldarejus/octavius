@@ -425,6 +425,7 @@ DTYPES = {
     "mass": np.float64,
     "dust_mass": np.float64,
     "rho": np.float64,
+    "smoothing_length": np.float64,
     "internal_energy": np.float64,
     "sfr": np.float64,
     "metallicity": np.float64,
