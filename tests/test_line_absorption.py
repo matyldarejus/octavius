@@ -16,6 +16,7 @@ import numpy as np
 # testing
 import pytest
 from astropy import units as u
+from astropy.constants import codata2022 as codata
 from scipy.integrate import quad
 from scipy.special import wofz
 
@@ -41,6 +42,16 @@ from octavius.line_absorption.absorption_helpers import (
     SightlineParticles,
     Sightlines,
     plane_axes,
+)
+from octavius.line_absorption.ion_tables import (
+    gamma_hi,
+    hydrogen_number_density,
+    ion_counts,
+    load_ion_table,
+    log_ion_fraction,
+    read_ion_table,
+    self_shielding_factor,
+    sigma_hi,
 )
 from octavius.line_absorption.line_profiles import (
     gaussian,
@@ -731,3 +742,162 @@ def test_equivalent_width_converges_with_pixel_size(pixel):
     _, dv, tau, _, _ = one_particle_spectrum(line=line, column=1e15, b=20.0, pixel=pixel)
     ew_fine = np.sum(1.0 - np.exp(-tau_fine)) * dv_fine
     assert np.sum(1.0 - np.exp(-tau)) * dv == pytest.approx(ew_fine, rel=1e-2)
+
+
+# ion tables
+
+# setup test constants
+ION_HEADER = "HydrogenI HeliumII  CarbonIV  OxygenVI  OxygeVIII MagnesiII SilicoIII IronII"  # truncated as in i31
+ION_NAMES = ("HI", "HeII", "CIV", "OVI", "OVIII", "MgII", "SiIII", "FeII")
+N_IONS = len(ION_NAMES)
+LOG_NH_GRID = np.arange(-9.0, 1.01, 0.5)
+LOG_T_GRID = np.arange(1.0, 9.01, 0.25)
+TABLE_PATTERN = "lt<z>f100_i31"
+
+
+def synthetic_log_fraction(log_nH, log_T, k, z):
+    """
+
+    Exactly bilinear in (log n_H, log T) and linear in z, so interpolation should hopefully reproduce it.
+
+    """
+    return -1.0 - 0.1 * (k + 1) * log_nH - 0.05 * log_T + 0.01 * log_nH * log_T + 0.3 * z
+
+
+def write_ion_table(path, z, header=ION_HEADER, n_ions=N_IONS):
+    """
+
+    Make a test ion table file.
+
+    """
+    nH, T = np.meshgrid(LOG_NH_GRID, LOG_T_GRID, indexing="ij")  # T fastest, as in the Cloudy files
+    columns = [nH.ravel(), T.ravel()] + [synthetic_log_fraction(nH, T, k, z).ravel() for k in range(n_ions)]
+    with path.open("w") as f:
+        f.write(f"#Hdens  Temp    {header} redshift= {z:.5f}\n")
+        np.savetxt(f, np.column_stack(columns), fmt="%.12f")
+
+
+# part 1 : check functions responsible for reading and interpolating the tables ------------------
+@pytest.fixture
+def ion_table_dir(tmp_path):
+    for z in (0.0, 0.5, 1.0):
+        write_ion_table(tmp_path / f"lt{round(z * 1e4):05d}f100_i31", z)  # pygad's naming: digits = z without the point
+    (tmp_path / "README").write_text("ignored: does not match the pattern")
+    return tmp_path
+
+
+def test_ion_table_header_names_are_correct(ion_table_dir):
+    table = read_ion_table(path=ion_table_dir / "lt05000f100_i31")
+    assert table.ions == ION_NAMES and table.redshift == 0.5
+    assert table.log_fraction.shape == (len(LOG_NH_GRID), len(LOG_T_GRID), len(ION_NAMES))
+
+
+def test_ion_table_header_with_missing_space(tmp_path):
+    path = tmp_path / "lt00000f100_i45"
+    write_ion_table(path, 0.0, header="SulphurIV SulphurVSulphurVI IronII", n_ions=4)
+    assert read_ion_table(path=path).ions == ("SIV", "SV", "SVI", "FeII")
+
+
+def test_ion_table_rejects_header_column_mismatch(tmp_path):
+    path = tmp_path / "lt00000f100_i31"
+    write_ion_table(path, 0.0, n_ions=len(ION_NAMES) - 1)
+    with pytest.raises(ValueError, match="data columns"):
+        read_ion_table(path=path)
+
+
+def test_ion_fraction_exact_at_grid_points(ion_table_dir):
+    """
+
+    Test for wrong interpolation weights.
+
+    """
+    table = load_ion_table(table_dir=ion_table_dir, pattern=TABLE_PATTERN, redshift=0.5)
+    nH, T = np.meshgrid(LOG_NH_GRID, LOG_T_GRID, indexing="ij")
+    got = log_ion_fraction(table=table, ion="OVI", log_nH=nH.ravel(), log_T=T.ravel())
+    np.testing.assert_allclose(got, synthetic_log_fraction(nH, T, 3, 0.5).ravel(), atol=1e-10)
+
+
+def test_ion_fraction_bilinear_between_grid_points(ion_table_dir):
+    table = load_ion_table(table_dir=ion_table_dir, pattern=TABLE_PATTERN, redshift=0.5)
+    rng = np.random.default_rng(1)
+    log_nH, log_T = rng.uniform(-9.0, 1.0, 1000), rng.uniform(1.0, 9.0, 1000)
+    got = log_ion_fraction(table=table, ion="OVI", log_nH=log_nH, log_T=log_T)
+    np.testing.assert_allclose(got, synthetic_log_fraction(log_nH, log_T, 3, 0.5), atol=1e-10)
+
+
+def test_ion_fraction_clamps_outside_grid(ion_table_dir):
+    table = load_ion_table(table_dir=ion_table_dir, pattern=TABLE_PATTERN, redshift=0.5)
+    got = log_ion_fraction(table=table, ion="OVI", log_nH=np.array([-12.0, 3.0]), log_T=np.array([0.0, 10.0]))
+    expected = synthetic_log_fraction(np.array([-9.0, 1.0]), np.array([1.0, 9.0]), 3, 0.5)
+    np.testing.assert_allclose(got, expected, atol=1e-10)
+
+
+def test_redshift_interpolation_and_edges(ion_table_dir):
+    def load(z):  # would use lambda but ruff doesn't like it
+        return load_ion_table(table_dir=ion_table_dir, pattern=TABLE_PATTERN, redshift=z)
+
+    z0, z05, z1 = (read_ion_table(path=ion_table_dir / f"lt{n}f100_i31") for n in ("00000", "05000", "10000"))
+    np.testing.assert_allclose(load(0.25).log_fraction, 0.5 * (z0.log_fraction + z05.log_fraction), atol=1e-12)
+    np.testing.assert_array_equal(load(0.5).log_fraction, z05.log_fraction)
+    np.testing.assert_array_equal(load(2.0).log_fraction, z1.log_fraction)  # beyond the tables: edge table
+
+
+def test_unknown_ion_raises(ion_table_dir):
+    table = load_ion_table(table_dir=ion_table_dir, pattern=TABLE_PATTERN, redshift=0.0)
+    with pytest.raises(KeyError, match="NII"):
+        log_ion_fraction(table=table, ion="NII", log_nH=np.zeros(1), log_T=np.full(1, 4.0))
+
+
+def test_mismatched_tables_raise(tmp_path):
+    write_ion_table(tmp_path / "lt00000f100_i31", 0.0)
+    write_ion_table(tmp_path / "lt05000f100_i31", 0.5, header="HydrogenI HeliumII", n_ions=2)
+    with pytest.raises(ValueError, match="different grids or ions"):
+        load_ion_table(table_dir=tmp_path, pattern=TABLE_PATTERN, redshift=0.25)
+
+
+# part 2 : check functions responsible for dealing with UV background and self-sheilding ----------
+@pytest.mark.parametrize(
+    ("uvb", "gamma_0", "sigma_0"),
+    [("HM12", 2.25e-14, 2.67e-18), ("FG20", 4.694e-14, -4.89946e-19 + 3.072648e-18)],  # pygad tables / sigHI fits
+)
+def test_uvb_rates_at_z0(uvb, gamma_0, sigma_0):
+    assert gamma_hi(redshift=0.0, uvb=uvb) == pytest.approx(gamma_0)
+    assert sigma_hi(redshift=0.0, uvb=uvb) == pytest.approx(sigma_0, rel=1e-12)
+
+
+def test_unknown_uvb_raises():
+    with pytest.raises(ValueError, match="P19"):
+        sigma_hi(redshift=0.0, uvb="P19")
+
+
+def test_hydrogen_density_and_ion_counts():
+    assert hydrogen_number_density(density=np.array([codata.m_p.cgs.value]), hydrogen_fraction=0.75)[
+        0
+    ] == pytest.approx(0.75)
+    oxygen_mass = 1e10 * 15.999 * codata.u.cgs.value  # grams of 1e10 oxygen atoms
+    assert ion_counts(fraction=np.array([0.2]), element_mass=np.array([oxygen_mass]), atomic_weight=15.999)[
+        0
+    ] == pytest.approx(2e9)
+
+
+@pytest.mark.parametrize(
+    ("uvb", "gamma_0", "sigma_0"),
+    [("HM12", 2.25e-14, 2.67e-18), ("FG20", 4.694e-14, -4.89946e-19 + 3.072648e-18)],  # pygad tables / sigHI fits
+)
+def test_self_shielding_limits_and_characteristic_density(uvb, gamma_0, sigma_0):
+    """
+
+    Check the Rahmati factor for 1) very thin gas (f ~ 1),
+    2) x = n_H / n_H,ss = 1,
+    3) very dense gas (f ~ 1e-3)
+    4) hot gas (f for n_H,ss prop to T^0.17)
+
+    """
+    n_ss = 6.73e-3 * (sigma_0 / 2.49e-18) ** (-2 / 3) * (0.16 / 0.17) ** (-1 / 3) * (gamma_0 * 1e12) ** (2 / 3)
+    f_at_n_ss = 0.98 * 2.0**-2.28 + 0.02 * 2.0**-0.84  # x = n_H / n_H,ss = 1
+    f = self_shielding_factor(n_H=np.array([1e-10, n_ss, 1e3]), T=np.full(3, 1e4), redshift=0.0, uvb=uvb)
+    assert f[0] == pytest.approx(1.0, abs=1e-5)  # optically thin
+    assert f[1] == pytest.approx(f_at_n_ss, rel=1e-12)
+    assert f[2] == 1e-3  # floored in dense gas
+    hot = self_shielding_factor(n_H=np.array([n_ss * 10.0**0.17]), T=np.array([1e5]), redshift=0.0, uvb=uvb)
+    assert hot[0] == pytest.approx(f_at_n_ss, rel=1e-12)  # n_H,ss scales as T^0.17

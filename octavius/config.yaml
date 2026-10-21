@@ -75,8 +75,13 @@ line_absorption:
   n_azimuth:                  8                             
   absorption_los_axis:        Z                             # x, y, z
   # gas preselection
-  absorption_exclude_winds:   true        # drop decoupled wind particles (Simba: DelayTime != 0)
-  absorption_chunk_size:      2500000     # gas particles per streamed read
+  absorption_exclude_winds:   true                  # drop decoupled wind particles (Simba: DelayTime != 0)
+  absorption_chunk_size:      2500000               # gas particles per streamed read
+  # ion tables
+  ion_table_dir:              /path/to/tbls-i31     # Cloudy ion tables
+  ion_table_pattern:          lt<z>f100_i31
+  absorption_uvb:             HM12                  # HM12, FG20
+  absorption_self_shielding:  true                  # false if the tables include shielding
 
 
 parallelism:

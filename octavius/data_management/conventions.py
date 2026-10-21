@@ -28,7 +28,14 @@ CONFIG_FIELDS = frozenset(
     {"thresholds", "physics", "fof6d", "properties", "photometry", "line_absorption", "parallelism", "logging"}
 )
 FILEPATHS = frozenset(
-    {"snapshot_path", "output_dir", "halo_catalogue_path", "photometry_table_path", "absorption_sample_path"}
+    {
+        "snapshot_path",
+        "output_dir",
+        "halo_catalogue_path",
+        "photometry_table_path",
+        "absorption_sample_path",
+        "ion_table_dir",
+    }
 )
 VALID_SIM_TYPES = frozenset({"SIMBA", "SWIFT-KIARA", "SWIFT-EAGLE", "SWIFT-COLIBRE", "TNG"})
 VALID_HALO_CATS = frozenset({"SNAPSHOT", "AHF", "HBT-HERONS", "SUBFIND"})
@@ -39,6 +46,7 @@ VALID_VIEW_AXES = frozenset({"X", "Y", "Z"})
 VALID_GAS_CRITERIA = frozenset({"COLD", "STARFORMING", "COLD_OR_STARFORMING", "DENSE_ONLY"})
 VALID_IMPACT_UNITS = frozenset({"R200", "KPC"})
 VALID_LOS_MODES = frozenset({"SAMPLE", "RANDOM"})
+VALID_UVBS = frozenset({"HM12", "FG20"})
 ALWAYS_POSITIVE = frozenset(
     {
         "b",
@@ -63,6 +71,7 @@ VALID_ENTRIES: dict[str, frozenset[str]] = {
     "impact_units": VALID_IMPACT_UNITS,
     "absorption_los_axis": VALID_VIEW_AXES,
     "absorption_los_mode": VALID_LOS_MODES,
+    "absorption_uvb": VALID_UVBS,
 }
 
 VALID_COMBOS: dict[str, frozenset[str]] = {
@@ -165,7 +174,11 @@ class OctaviusConfig:
     n_azimuth: int = 8
     absorption_los_axis: str = "Z"
     absorption_exclude_winds: bool = True
-    absorption_chunk_size: int = 4000000
+    absorption_chunk_size: int = 2500000
+    absorption_uvb: str = "HM12"
+    ion_table_dir: Path | None = None
+    ion_table_pattern: str = "lt<z>f100_i31"
+    absorption_self_shielding: bool = True
 
     terminal_output_level: str = "INFO"
     keep_logs: bool = False

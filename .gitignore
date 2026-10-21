@@ -22,7 +22,7 @@ octavian-env/
 *.png
 *.jpg
 *.jpeg
-!octavius/line_absorption/line_data.csv
+!octavius/line_absorption/*.csv
 
 # editors
 .vscode/
