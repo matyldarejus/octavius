@@ -173,6 +173,25 @@ class SightlineParticles:
 
 
 @dataclass(frozen=True, slots=True)
+class SightlineSpectra:
+    """
+
+    Optical depth along one sightline set for one transition, before any instrument effects.
+
+    """
+
+    line: str  # transition name
+    velocity: np.ndarray  # (n_bins,) km/s
+    tau: np.ndarray  # (n_los, n_bins)
+    weighted: dict[str, np.ndarray]  # quantity to tau-weighted mean (0 where tau = 0)
+    member_column: np.ndarray
+
+    @property
+    def n_los(self) -> int:
+        return self.tau.shape[0]
+
+
+@dataclass(frozen=True, slots=True)
 class GasLayout:
     """
 
@@ -219,7 +238,7 @@ GAS_LAYOUTS: dict[str, GasLayout] = {
         kernel="CUBIC",
         baryon_fraction=0.048 / 0.3,  # GIZMO SmoothingLength = support radius
     ),
-    "SIMBA-C": GasLayout(  # Hough et al. (2023); same cosmology as Simba (CHECK)
+    "SIMBA-C": GasLayout(  # Hough et al. (2023)
         name="SIMBA-C",
         metals_dataset="Metallicity",
         metal_columns=SIMBA_C_METAL_COLUMNS,

@@ -37,6 +37,7 @@ FILEPATHS = frozenset(
         "ion_table_dir",
     }
 )
+CASE_SENSITIVE = frozenset({"ion_table_pattern"})
 VALID_SIM_TYPES = frozenset({"SIMBA", "SWIFT-KIARA", "SWIFT-EAGLE", "SWIFT-COLIBRE", "TNG"})
 VALID_HALO_CATS = frozenset({"SNAPSHOT", "AHF", "HBT-HERONS", "SUBFIND"})
 VALID_HALO_CENTRES = frozenset({"MIN_POT", "COM"})
@@ -58,6 +59,7 @@ ALWAYS_POSITIVE = frozenset(
         "n_azimuth",
         "absorption_chunk_size",
         "n_random_los",
+        "absorption_pixel_kms",
     }
 )
 
@@ -179,6 +181,8 @@ class OctaviusConfig:
     ion_table_dir: Path | None = None
     ion_table_pattern: str = "lt<z>f100_i31"
     absorption_self_shielding: bool = True
+    absorption_lines: list[str] = field(default_factory=lambda: ["OVI1031"])
+    absorption_pixel_kms: float = 2.5
 
     terminal_output_level: str = "INFO"
     keep_logs: bool = False
@@ -193,9 +197,10 @@ class OctaviusConfig:
         Post-initialisation validation of both sensible and valid config parameters to prevent errors at runtime.
         """
         # uppercase all strings which are expected to be uppercase
+        # except for ion_table_pattern
         for f in fields(self):
             value = getattr(self, f.name)
-            if isinstance(value, str) and f.name not in FILEPATHS:
+            if isinstance(value, str) and f.name not in FILEPATHS | CASE_SENSITIVE:
                 object.__setattr__(self, f.name, value.upper())
 
         # str fields which only have certain allowed inputs

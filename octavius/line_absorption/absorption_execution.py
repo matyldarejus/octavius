@@ -24,15 +24,26 @@ from ..data_management import OctaviusConstants, build_reader, output_catalogue_
 from ..data_management.parallel_reading import generate_read_plan
 from ..log import get_logger
 from ..utils import load_catalogue
+from .absorption_computations import (
+    build_projected_kernel_table,
+    line_of_sight_velocities,
+    optical_depth,
+    velocity_grid,
+)
 from .absorption_helpers import (
+    KERNEL_IDX,
     LOS_AXIS_IDX,
     GasLayout,
     SampleEntries,
     SightlineParams,
     SightlineParticles,
     Sightlines,
+    SightlineSpectra,
     detect_gas_layout,
+    plane_axes,
 )
+from .ion_tables import DEFAULT_BARYON_FRACTION, hydrogen_number_density, ion_counts, ion_fraction, load_ion_table
+from .line_profiles import line_constants, load_line_table
 from .sightlines import (
     assemble_sightline_particles,
     build_random_sightlines,
@@ -45,11 +56,14 @@ logger = get_logger()
 
 SIGHTLINE_CELLS_PER_STRIDE: int = 256  # cell width = boxsize / SIGHTLINE_CELLS_PER_STRIDE
 GAS_PROPERTIES = ["pos", "vel", "smoothing_length", "rho", "mass", "temperature"]  # properties for second gas read
+KPC_CM = (1.0 * u.kpc).to(u.cm).value
+MSUN_G = (1.0 * u.M_sun).to(u.g).value
+WEIGHTED_QUANTITIES = ("temperature", "rho", "metallicity", "v_pec")  # tau-weighted per pixel
 
 
 def run_absorption(
     *, config: OctaviusConfig, catalogue_path: Path | None = None
-) -> list[tuple[Sightlines, SightlineParticles]]:
+) -> list[tuple[Sightlines, SightlineParticles, dict[str, SightlineSpectra]]]:
     """
 
     Gets a galaxy sample, prepares sightlines, and builds mock absorption spectra
@@ -65,7 +79,7 @@ def run_absorption(
     Returns
     -----------
     results: list[tuple[Sightlines, SightlineParticles]]
-        One (sightlines, preselected gas) pair per sightline set: per projection axis in SAMPLE mode (X, Y, Z
+        One (sightlines, preselected gas, spectra by line name) per sightline set: per projection axis in SAMPLE mode (X, Y, Z
         order), a single set in RANDOM mode.
 
     """
@@ -94,9 +108,9 @@ def run_absorption(
             f"({len(particles.los_members):,} particle-sightline pairs) for {sightlines.n_los} sightlines."
         )
 
-    logger.warning("Spectra are not implemented yet; stopping after gas preselection.")
+    spectra = _synthesise_spectra(config=config, sightline_sets=sightline_sets, sightline_particles=sightline_particles)
 
-    return list(zip(sightline_sets, sightline_particles))
+    return list(zip(sightline_sets, sightline_particles, spectra))
 
 
 def _sample_sightlines(
@@ -127,8 +141,7 @@ def _sample_sightlines(
         geometry = _read_galaxy_geometry(catalogue=catalogue, galaxy_idx=entries.galaxy_idx)
         boxsize = catalogue.boxsize_comoving
         scale_factor = float(catalogue.sim_info("scale_factor"))
-        hubble_raw = float(catalogue.sim_info("Hz"))
-        hubble = (hubble_raw * u.km / u.s / u.Mpc).to(u.km / u.s / u.kpc).value  # km/s/kpc
+        hubble = (float(catalogue.sim_info("Hz")) / u.s).to(u.km / u.s / u.kpc).value  # km/s/kpc
 
     if params.impact_in_r200c:
         require_finite_r200c(r200c=geometry["r200c"], galaxy_idx=entries.galaxy_idx)
@@ -201,7 +214,7 @@ def read_sample_file(*, path: Path, n_galaxies: int, default_los_axis: int) -> S
     # empty galaxy_idx
     if galaxy_idx.ndim != 1 or n_entries == 0:
         raise ValueError("Sample file galaxy_idx must be a non-empty 1D array.")
-    # mismatch length datasets
+    # mismatched length datasets
     if len(los_axis) != n_entries or (bin_label is not None and len(bin_label) != n_entries):
         raise ValueError("Sample file datasets must all have the same length as galaxy_idx.")
     # more galaxies than the catalogue holds
@@ -262,7 +275,7 @@ def _read_box_from_snapshot(*, config: OctaviusConfig) -> tuple[float, float, fl
         snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
     )
     sim = reader.simulation_attributes
-    hubble = (sim.Hz * u.km / u.s / u.Mpc).to(u.km / u.s / u.kpc).value
+    hubble = (sim.Hz / u.s).to(u.km / u.s / u.kpc).value
     return float(sim.boxsize), float(sim.scale_factor), float(hubble)
 
 
@@ -352,7 +365,7 @@ def _read_gas_properties(
         metals = snapshot[reader.inverse_ptype_map["gas"]][layout.metals_dataset]
         gas["metals"] = np.empty((len(particle_idx), metals.shape[1]), dtype=np.float64)
         position = 0
-        for read_slice, mask in generate_read_plan(idx_sorted=particle_idx):  # contigous reads
+        for read_slice, mask in generate_read_plan(idx_sorted=particle_idx):  # contiguous reads
             chunk = metals[read_slice]
             if mask is not None:
                 chunk = chunk[mask]
@@ -360,6 +373,161 @@ def _read_gas_properties(
             position += len(chunk)
 
     return gas
+
+
+def _synthesise_spectra(
+    *, config: OctaviusConfig, sightline_sets: list[Sightlines], sightline_particles: list[SightlineParticles]
+) -> list[dict[str, SightlineSpectra]]:
+    """
+
+    Computes the optical depth of every requested line along every sightline set.
+
+    Particle properties are read in for all kept particles in preselect_particles. Then, ion
+    counts come from the Cloudy tables (with an optional Rahmati self-shielding correction).
+
+    Each set is then synthesised by optical_depth.
+
+    """
+    if not config.absorption_lines:
+        return [{} for _ in sightline_sets]
+
+    lines = load_line_table()
+    unknown = [name for name in config.absorption_lines if name not in lines]
+    if unknown:
+        raise ValueError(f"Unknown absorption_lines {unknown}; names must match line_absorption/line_data.csv.")
+
+    reader = build_reader(
+        snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
+    )
+    sim = reader.simulation_attributes
+    redshift, scale_factor = float(sim.redshift), float(sim.scale_factor)
+    hubble = (sim.Hz / u.s).to(u.km / u.s / u.kpc).value  # km/s/kpc
+
+    with h5py.File(config.snapshot_path, "r") as snapshot:
+        layout = _gas_layout(
+            snapshot=snapshot, sim_type=config.simulation_type, gas_group=reader.inverse_ptype_map["gas"]
+        )
+        support_factor = _kernel_support_factor(snapshot=snapshot, layout=layout)
+    if layout.kernel is None:
+        raise NotImplementedError(f"Spectra for {layout.name} need its kernel from snapshot metadata.")
+
+    # build the kernel + ion tables
+    kernel_table = build_projected_kernel_table(KERNEL_IDX[layout.kernel])
+    ion_table = load_ion_table(table_dir=config.ion_table_dir, pattern=config.ion_table_pattern, redshift=redshift)
+
+    logger.info(
+        f"Spectra: {', '.join(config.absorption_lines)} || ion tables {config.ion_table_dir} ({config.ion_table_pattern}), "
+        f"UVB {config.absorption_uvb}, self-shielding {'on' if config.absorption_self_shielding else 'off'} | "
+        f"gas layout {layout.name}, {layout.kernel} kernel."
+    )
+
+    # now, do the second gas read
+    # get all kept particle indices to read snapshot only once
+    kept = np.unique(np.concatenate([p.particle_idx for p in sightline_particles]))
+
+    # get their properties
+    gas = _read_gas_properties(config=config, particle_idx=kept, layout=layout)
+    gas["support"] = gas["smoothing_length"] * support_factor
+    metals = gas["metals"]
+    if layout.stores_hydrogen:
+        hydrogen_fraction = metals[:, layout.column("H")]
+    else:
+        hydrogen_fraction = 1.0 - metals[:, layout.column("He")]
+    n_H = hydrogen_number_density(density=gas["rho"], hydrogen_fraction=hydrogen_fraction)
+    baryon_fraction = layout.baryon_fraction if layout.baryon_fraction is not None else DEFAULT_BARYON_FRACTION
+
+    # find where each sightline set's particle sits in kept particles
+    rows = [np.searchsorted(kept, p.particle_idx) for p in sightline_particles]
+
+    # synthesise spectra
+    spectra: list[dict[str, SightlineSpectra]] = [{} for _ in sightline_sets]
+    for name in config.absorption_lines:
+        transition = lines[name]
+        constants = line_constants(transition=transition)
+        element_fraction = (
+            hydrogen_fraction if transition.element == "H" else metals[:, layout.column(transition.element)]
+        )
+        fraction = ion_fraction(
+            table=ion_table,
+            ion=transition.ion,
+            n_H=n_H,
+            T=gas["temperature"],
+            redshift=redshift,
+            self_shield=config.absorption_self_shielding,
+            baryon_fraction=baryon_fraction,
+            uvb=config.absorption_uvb,
+        )
+        gas["n_ion"] = ion_counts(
+            fraction=fraction,
+            element_mass=element_fraction * gas["mass"] * MSUN_G,
+            atomic_weight=transition.atomic_weight,
+        )
+        gas["b"] = constants.b_0 * np.sqrt(gas["temperature"])
+
+        for k, (sightlines, particles) in enumerate(zip(sightline_sets, sightline_particles)):
+            spectra[k][name] = _sightline_set_spectrum(
+                name=name,
+                sightlines=sightlines,
+                particles=particles,
+                gas=gas,
+                rows=rows[k],
+                constants=constants,
+                kernel_table=kernel_table,
+                scale_factor=scale_factor,
+                hubble=hubble,
+                pixel_kms=config.absorption_pixel_kms,
+            )
+        logger.info(f"Synthesised {name} for {sum(s.n_los for s in sightline_sets)} sightlines.")
+
+    return spectra
+
+
+def _sightline_set_spectrum(
+    *, name, sightlines, particles, gas, rows, constants, kernel_table, scale_factor, hubble, pixel_kms
+) -> SightlineSpectra:
+    """
+
+    Takes one line along one sightline set: the set's particles projected on its plane axes, line centres from the
+    Hubble flow and peculiar velocities along its axis, then computes optical_depth.
+
+    """
+    los_axis = sightlines.los_axis
+    axis_1, axis_2 = plane_axes(los_axis=los_axis)
+    pos = gas["pos"][rows]
+    v_pec = gas["vel"][rows, los_axis]
+    v_line = line_of_sight_velocities(
+        x_los=pos[:, los_axis], v_pec_los=v_pec, scale_factor=scale_factor, hubble=hubble, vbox=sightlines.vbox
+    )
+    # average over each pixel
+    weights = np.column_stack([gas["temperature"][rows], gas["rho"][rows], gas["metals"][rows, 0], v_pec])
+    n_bins, dv = velocity_grid(vbox=sightlines.vbox, pixel_kms=pixel_kms)  # pixel grid
+
+    tau, weighted, member_column = optical_depth(
+        sightlines.pos[:, 0],
+        sightlines.pos[:, 1],
+        particles.los_offsets,
+        particles.los_members,
+        np.ascontiguousarray(pos[:, axis_1]),
+        np.ascontiguousarray(pos[:, axis_2]),
+        gas["support"][rows],
+        gas["n_ion"][rows],
+        v_line,
+        gas["b"][rows],
+        weights,
+        sightlines.boxsize,
+        scale_factor * KPC_CM,
+        n_bins,
+        dv,
+        constants,
+        kernel_table,
+    )
+    return SightlineSpectra(
+        line=name,
+        velocity=(np.arange(n_bins) + 0.5) * dv,
+        tau=tau,
+        weighted={quantity: weighted[:, w] for w, quantity in enumerate(WEIGHTED_QUANTITIES)},
+        member_column=member_column,
+    )
 
 
 def _gas_layout(*, snapshot: h5py.File, sim_type: str, gas_group: str) -> GasLayout:

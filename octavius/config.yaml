@@ -82,7 +82,9 @@ line_absorption:
   ion_table_pattern:          lt<z>f100_i31
   absorption_uvb:             HM12                  # HM12, FG20
   absorption_self_shielding:  true                  # false if the tables include shielding
-
+  # spectra
+  absorption_lines:           [OVI1031]             # any lines listed in line_data.csv
+  absorption_pixel_kms:       2.5
 
 parallelism:
   n_io_chunks:        10    # for IO reads on datasets, not chunking the pipeline

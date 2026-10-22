@@ -441,6 +441,7 @@ def absorption_run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Octa
         velocity_factor=5,
         compress_catalogue=False,
         stages=STAGES,
+        absorption_lines=[],
     )
     return analyse_snapshot(config=config), config
 
@@ -457,7 +458,7 @@ def test_run_absorption_groups_entries_by_axis(absorption_run, tmp_path):
     config = replace(config, absorption_sample_path=sample_path, impact_units="KPC")
     results = run_absorption(config=config)
 
-    sightline_sets = [sightlines for sightlines, _ in results]
+    sightline_sets = [sightlines for sightlines, _, _ in results]
 
     assert [s.los_axis for s in sightline_sets] == [0, 2]  # X first, then Z
     n_per_entry = (1 if 0.0 in config.impact_parameters else 0) + sum(
@@ -468,9 +469,10 @@ def test_run_absorption_groups_entries_by_axis(absorption_run, tmp_path):
     assert sorted(set(sightline_sets[1].entry_idx.tolist())) == [0, 2]  # rows of the sample file
     assert set(sightline_sets[1].galaxy_idx.tolist()) == {0, n_galaxies - 1}
 
-    for sightlines, particles in results:
+    for sightlines, particles, spectra in results:
         assert len(particles.los_offsets) == sightlines.n_los + 1
         assert particles.los_offsets[-1] == len(particles.los_members)
+        assert spectra == {}
 
 
 def test_run_absorption_requires_a_sample_path(absorption_run):
@@ -482,7 +484,7 @@ def test_run_absorption_requires_a_sample_path(absorption_run):
 def test_run_absorption_random_mode_needs_no_sample(absorption_run):
     _, config = absorption_run
     config = replace(config, absorption_los_mode="RANDOM", absorption_sample_path=None, n_random_los=50)
-    ((sightlines, particles),) = run_absorption(config=config)
+    ((sightlines, particles, _),) = run_absorption(config=config)
     assert sightlines.n_los == 50
     assert sightlines.los_axis == {"X": 0, "Y": 1, "Z": 2}[config.absorption_los_axis]
     assert len(particles.los_offsets) == 51
@@ -503,6 +505,50 @@ def test_second_gas_read_matches_snapshot(absorption_run):
     np.testing.assert_array_equal(props["metals"], raw_metals)
     np.testing.assert_allclose(props["smoothing_length"], raw_hsml / h, rtol=1e-6)  # kpc a / h -> kpc a
     assert np.all(props["temperature"] > 0.0) and np.all(props["rho"] > 0.0)
+
+
+def test_run_absorption_synthesises_spectra(absorption_run, tmp_path):
+    _, config = absorption_run
+    for z in (0.0, 0.5, 1.0):
+        write_ion_table(tmp_path / f"lt{round(z * 1e4):05d}f100_i31", z)
+    config = replace(
+        config,
+        absorption_los_mode="RANDOM",
+        absorption_sample_path=None,
+        n_random_los=40,
+        absorption_lines=["OVI1031", "H1215"],
+        ion_table_dir=tmp_path,
+        ion_table_pattern=TABLE_PATTERN,
+    )
+    ((sightlines, particles, spectra),) = run_absorption(config=config)
+
+    assert set(spectra) == {"OVI1031", "H1215"}
+    for name, spectrum in spectra.items():
+        dv = spectrum.velocity[1] - spectrum.velocity[0]
+        assert spectrum.tau.shape == (sightlines.n_los, len(spectrum.velocity))
+        assert len(spectrum.velocity) * dv == pytest.approx(sightlines.vbox)  # check that pixels tile the box
+        assert np.all(spectrum.tau >= 0.0) and len(spectrum.member_column) == len(particles.los_members)
+        assert set(spectrum.weighted) == {"temperature", "rho", "metallicity", "v_pec"}
+
+        # every sightline conserves its column: sum_k tau_k dv = xsec * sum of its particles' columns
+        cumulative = np.concatenate([[0.0], np.cumsum(spectrum.member_column)])
+        column = cumulative[particles.los_offsets[1:]] - cumulative[particles.los_offsets[:-1]]
+        xsec = line_constants(transition=load_line_table()[name]).xsec
+        np.testing.assert_allclose(
+            spectrum.tau.sum(axis=1) * dv, xsec * column, rtol=1e-3, atol=1e-12 * xsec * column.max()
+        )
+
+        has_tau = spectrum.tau > 0.0
+        assert np.all(spectrum.weighted["temperature"][has_tau] > 0.0)
+
+
+def test_unknown_absorption_line_raises(absorption_run):
+    _, config = absorption_run
+    config = replace(
+        config, absorption_los_mode="RANDOM", absorption_sample_path=None, n_random_los=5, absorption_lines=["OVI1067"]
+    )
+    with pytest.raises(ValueError, match="OVI1067"):
+        run_absorption(config=config)
 
 
 # line data and profiles
