@@ -34,6 +34,7 @@ FILEPATHS = frozenset(
         "halo_catalogue_path",
         "photometry_table_path",
         "absorption_sample_path",
+        "absorption_los_path",
         "ion_table_dir",
     }
 )
@@ -46,7 +47,7 @@ VALID_KERNELS = frozenset(["CUBIC", "QUINTIC"])
 VALID_VIEW_AXES = frozenset({"X", "Y", "Z"})
 VALID_GAS_CRITERIA = frozenset({"COLD", "STARFORMING", "COLD_OR_STARFORMING", "DENSE_ONLY"})
 VALID_IMPACT_UNITS = frozenset({"R200", "KPC"})
-VALID_LOS_MODES = frozenset({"SAMPLE", "RANDOM"})
+VALID_LOS_MODES = frozenset({"SAMPLE", "RANDOM", "EXPLICIT"})
 VALID_UVBS = frozenset({"HM12", "FG20"})
 ALWAYS_POSITIVE = frozenset(
     {
@@ -168,6 +169,7 @@ class OctaviusConfig:
     _keep_spectra: bool = False  # used for standalone photometry, not in YAML file
 
     absorption_sample_path: Path | None = None
+    absorption_los_path: Path | None = None
     absorption_los_mode: str = "SAMPLE"
     n_random_los: int = 1000
     absorption_seed: int = 22082003

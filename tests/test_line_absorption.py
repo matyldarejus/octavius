@@ -34,6 +34,7 @@ from octavius.line_absorption.absorption_execution import (
     _kernel_support_factor,
     _read_gas_properties,
     prepare_sightline_params,
+    read_los_file,
     read_sample_file,
     require_finite_r200c,
 )
@@ -66,6 +67,7 @@ from octavius.line_absorption.line_profiles import (
 )
 from octavius.line_absorption.sightlines import (
     assemble_sightline_particles,
+    build_explicit_sightlines,
     build_random_sightlines,
     build_sightline_grid,
     build_sightlines,
@@ -180,6 +182,33 @@ def test_require_finite_r200c():
         require_finite_r200c(r200c=np.array([100.0, np.nan]), galaxy_idx=np.array([0, 1]))
 
 
+# los file
+
+
+def write_los_file(path, *, pos, los_axis=None):
+    with h5py.File(path, "w") as f:
+        f.create_dataset("pos", data=np.asarray(pos, dtype=np.float64))
+        if los_axis is not None:
+            f.create_dataset("los_axis", data=np.array(los_axis, dtype="S1"))
+    return path
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"pos": np.zeros((0, 3))},
+        {"pos": np.zeros((2, 2))},
+        {"pos": [[np.nan, 0.0, 0.0]]},
+        {"pos": np.zeros((2, 3)), "los_axis": ["Z", "W"]},
+        {"pos": np.zeros((2, 3)), "los_axis": ["Z"]},
+    ],
+)
+def test_los_file_rejects_bad_input(tmp_path, kwargs):
+    path = write_los_file(tmp_path / "los.hdf5", **kwargs)
+    with pytest.raises(ValueError):
+        read_los_file(path=path, default_los_axis=2)
+
+
 # sightlines
 
 BOXSIZE = 1000.0  # kpc a
@@ -281,6 +310,55 @@ def test_random_sightlines_inside_box_with_sentinels():
 def test_random_sightlines_are_seeded():
     assert np.array_equal(random_sightlines(seed=3).pos, random_sightlines(seed=3).pos)
     assert not np.array_equal(random_sightlines(seed=3).pos, random_sightlines(seed=4).pos)
+
+
+@pytest.mark.parametrize(("los_axis", "expected"), [(2, (1.0, 2.0)), (0, (2.0, 3.0)), (1, (3.0, 1.0))])
+def test_explicit_sightlines_use_the_right_handed_plane(los_axis, expected):
+    sightlines = build_explicit_sightlines(
+        pos=np.array([[1.0, 2.0, 3.0]]),
+        entry_idx=np.array([7]),
+        los_axis=los_axis,
+        boxsize=100.0,
+        scale_factor=0.5,
+        hubble=0.1,
+    )
+    np.testing.assert_array_equal(sightlines.pos[0], expected)
+    assert sightlines.entry_idx[0] == 7 and sightlines.galaxy_idx[0] == -1
+    assert np.isnan(sightlines.impact[0]) and sightlines.vbox == pytest.approx(0.1 * 0.5 * 100.0)
+
+
+def test_explicit_sightlines_wrap_into_the_box():
+    sightlines = build_explicit_sightlines(
+        pos=np.array([[-1.0, 102.0, 50.0]]),
+        entry_idx=np.array([0]),
+        los_axis=2,
+        boxsize=100.0,
+        scale_factor=1.0,
+        hubble=0.1,
+    )
+    np.testing.assert_allclose(sightlines.pos[0], (99.0, 2.0))
+
+
+def test_run_absorption_explicit_mode(absorption_run, tmp_path):
+    _, config = absorption_run
+    path = write_los_file(
+        tmp_path / "los.hdf5", pos=[[10.0, 20.0, 30.0], [5.0, 6.0, 7.0], [40.0, 50.0, 60.0]], los_axis=["Z", "X", "Z"]
+    )
+    results = run_absorption(config=replace(config, absorption_los_mode="EXPLICIT", absorption_los_path=path))
+
+    (x_set, _, x_spectra), (z_set, _, _) = results  # X first, then Z
+    assert (x_set.los_axis, z_set.los_axis) == (0, 2)
+    np.testing.assert_array_equal(x_set.entry_idx, [1])
+    np.testing.assert_allclose(x_set.pos, [[6.0, 7.0]])  # X axis: plane (Y, Z)
+    np.testing.assert_array_equal(z_set.entry_idx, [0, 2])
+    np.testing.assert_allclose(z_set.pos, [[10.0, 20.0], [40.0, 50.0]])  # Z axis: plane (X, Y)
+    assert x_spectra == {}  # absorption_lines=[] in the fixture
+
+
+def test_run_absorption_explicit_mode_requires_a_path(absorption_run):
+    _, config = absorption_run
+    with pytest.raises(ValueError, match="absorption_los_path"):
+        run_absorption(config=replace(config, absorption_los_mode="EXPLICIT", absorption_los_path=None))
 
 
 # gas preselection

@@ -116,14 +116,54 @@ def build_random_sightlines(
     """
     rng = np.random.default_rng(seed)
 
-    # this is just across the whole box, so fill the remaining fields with -1's and Nan's
-    no_galaxy = np.full(n_los, -1, dtype=np.int64)
-    undefined = np.full(n_los, np.nan)
+    return _box_sightlines(
+        plane_pos=rng.uniform(0.0, boxsize, size=(n_los, 2)),
+        entry_idx=np.full(n_los, -1, dtype=np.int64),
+        los_axis=los_axis,
+        boxsize=boxsize,
+        scale_factor=scale_factor,
+        hubble=hubble,
+    )
 
+
+def build_explicit_sightlines(
+    *, pos: np.ndarray, entry_idx: np.ndarray, los_axis: int, boxsize: float, scale_factor: float, hubble: float
+):
+    """
+
+    Builds sightlines parallel to the LOS axis through user-provided positions in the box (ckpc, shape (n, 3)).
+
+    The coordinate along the LOS axis is ignored as the sightline goes through the whole box; positions outside
+    the box are wrapped periodically.
+
+    """
+    plane_pos = np.mod(pos[:, list(plane_axes(los_axis=los_axis))], boxsize)
+    return _box_sightlines(
+        plane_pos=plane_pos,
+        entry_idx=np.asarray(entry_idx, dtype=np.int64),
+        los_axis=los_axis,
+        boxsize=boxsize,
+        scale_factor=scale_factor,
+        hubble=hubble,
+    )
+
+
+def _box_sightlines(
+    *, plane_pos: np.ndarray, entry_idx: np.ndarray, los_axis: int, boxsize: float, scale_factor: float, hubble: float
+):
+    """
+
+    Places full-box sightlines not associated with any galaxy for random and explicit sampling modes.
+
+    Sets galaxy_idx = -1 and the galaxy-relative fields = NaN.
+
+    """
+    n_los = len(plane_pos)
+    undefined = np.full(n_los, np.nan)
     return Sightlines(
-        pos=rng.uniform(0.0, boxsize, size=(n_los, 2)),
-        entry_idx=no_galaxy,
-        galaxy_idx=no_galaxy.copy(),
+        pos=plane_pos,
+        entry_idx=entry_idx,
+        galaxy_idx=np.full(n_los, -1, dtype=np.int64),
         impact_param=undefined,
         impact=undefined.copy(),
         azimuth=undefined.copy(),

@@ -66,7 +66,8 @@ photometry:
 
 line_absorption:
   absorption_sample_path:     /path/to/sample.hdf5
-  absorption_los_mode:        SAMPLE                        # sample, random
+  absorption_los_mode:        SAMPLE                        # sample, random, explicit
+  absorption_los_path:        /path/to/sightlines.hdf5
   n_random_los:               1000   
   absorption_seed:            22082003
   # sightlines

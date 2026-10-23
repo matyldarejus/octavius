@@ -46,6 +46,7 @@ from .ion_tables import DEFAULT_BARYON_FRACTION, hydrogen_number_density, ion_co
 from .line_profiles import line_constants, load_line_table
 from .sightlines import (
     assemble_sightline_particles,
+    build_explicit_sightlines,
     build_random_sightlines,
     build_sightline_grid,
     build_sightlines,
@@ -95,6 +96,26 @@ def run_absorption(
                 seed=config.absorption_seed,
             )
         ]
+    elif config.absorption_los_mode == "EXPLICIT":
+        if config.absorption_los_path is None:
+            raise ValueError("absorption_los_path is not set in the line_absorption config section.")
+        boxsize, scale_factor, hubble = _read_box_from_snapshot(config=config)
+        pos, los_axis = read_los_file(
+            path=config.absorption_los_path, default_los_axis=LOS_AXIS_IDX[config.absorption_los_axis]
+        )
+        sightline_sets = []
+        for axis in np.unique(los_axis):  # sort x, y, z in order
+            rows = np.flatnonzero(los_axis == axis)  # file rows projected along this axis
+            sightline_sets.append(
+                build_explicit_sightlines(
+                    pos=pos[rows],
+                    entry_idx=rows,
+                    los_axis=int(axis),
+                    boxsize=boxsize,
+                    scale_factor=scale_factor,
+                    hubble=hubble,
+                )
+            )
     else:
         sightline_sets = _sample_sightlines(config=config, catalogue_path=catalogue_path)
 
@@ -198,14 +219,7 @@ def read_sample_file(*, path: Path, n_galaxies: int, default_los_axis: int) -> S
         galaxy_idx = np.asarray(f["galaxy_idx"][:], dtype=np.int64)
         n_entries = len(galaxy_idx)
 
-        if "los_axis" in f:
-            names = [name.upper() for name in f["los_axis"].asstr()[:]]
-            unknown = sorted(set(names) - set(LOS_AXIS_IDX))
-            if unknown:
-                raise ValueError(f"Sample file los_axis has invalid entries {unknown}; use X, Y, or Z.")
-            los_axis = np.array([LOS_AXIS_IDX[name] for name in names], dtype=np.int64)
-        else:
-            los_axis = np.full(n_entries, default_los_axis, dtype=np.int64)
+        los_axis = _read_los_axes(f=f, n_entries=n_entries, default_los_axis=default_los_axis)
 
         bin_label = np.asarray(f["bin_label"].asstr()[:]) if "bin_label" in f else None
         attrs = dict(f.attrs)
@@ -225,6 +239,45 @@ def read_sample_file(*, path: Path, n_galaxies: int, default_los_axis: int) -> S
         raise ValueError("Sample file repeats a (galaxy_idx, los_axis) pair.")
 
     return SampleEntries(galaxy_idx=galaxy_idx, los_axis=los_axis, bin_label=bin_label, attrs=attrs)
+
+
+def read_los_file(*, path: Path, default_los_axis: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+
+    Reads and validates user-provide sightline position file for explicit sampling mode.
+
+    Currently, this is an h5py file as the expectation is that these positions will be chosen
+    around specific objects, such that the file will be created in a script.
+
+    This should hold 'pos' (ckpc, (n, 3)) and optional per-row 'los_axis' (X, Y, or Z).
+
+    """
+    with h5py.File(path, "r") as f:
+        if "pos" not in f:
+            raise KeyError(f"Sightline file {path} has no 'pos' dataset.")
+        pos = np.asarray(f["pos"][:], dtype=np.float64)
+
+        if "los_axis" in f:
+            names = [name.upper() for name in f["los_axis"].asstr()[:]]
+            unknown = sorted(set(names) - set(LOS_AXIS_IDX))
+            if unknown:
+                raise ValueError(f"Sightline file los_axis has invalid entries {unknown}; use X, Y, or Z.")
+            los_axis = np.array([LOS_AXIS_IDX[name] for name in names], dtype=np.int64)
+        else:
+            los_axis = np.full(len(pos), default_los_axis, dtype=np.int64)
+
+    # guards for:
+    # wrong shape or empty
+    if pos.ndim != 2 or pos.shape[1] != 3 or len(pos) == 0:
+        raise ValueError(f"Sightline file pos must have shape (n, 3) with n > 0, got {pos.shape}.")
+    # non-finite positions
+    if not np.all(np.isfinite(pos)):
+        raise ValueError("Sightline file pos contains non-finite values.")
+    # mismatched length datasets
+    if len(los_axis) != len(pos):
+        raise ValueError("Sightline file los_axis must have the same length as pos.")
+
+    return pos, los_axis
 
 
 def require_finite_r200c(*, r200c: np.ndarray, galaxy_idx: np.ndarray) -> None:
@@ -277,6 +330,21 @@ def _read_box_from_snapshot(*, config: OctaviusConfig) -> tuple[float, float, fl
     sim = reader.simulation_attributes
     hubble = (sim.Hz / u.s).to(u.km / u.s / u.kpc).value
     return float(sim.boxsize), float(sim.scale_factor), float(hubble)
+
+
+def _read_los_axes(*, f: h5py.File, n_entries: int, default_los_axis: int) -> np.ndarray:
+    """
+
+    Per-row projection axes from an optional 'los_axis' field, else use the config default.
+
+    """
+    if "los_axis" not in f:
+        return np.full(n_entries, default_los_axis, dtype=np.int64)
+    names = [name.upper() for name in f["los_axis"].asstr()[:]]
+    unknown = sorted(set(names) - set(LOS_AXIS_IDX))
+    if unknown:
+        raise ValueError(f"Sightline file los_axis has invalid entries {unknown}; use X, Y, or Z.")
+    return np.array([LOS_AXIS_IDX[name] for name in names], dtype=np.int64)
 
 
 def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) -> list[SightlineParticles]:

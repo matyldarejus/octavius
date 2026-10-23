@@ -1,4 +1,4 @@
-# HI photoionisation rate Gamma_HI of the Haardt & Madau (2012, ApJ 746, 125) UV background,
+# HI photoionisation rate Gamma_HI of the Faucher-Giguère (2020, doi : 10.1093/mnras/staa302) UV background,
 # as tabulated in pygad (cloudy/treecol.py, UVB_data['FG19']); used for Rahmati+13 self-shielding.
 log10_1pz,gamma_HI_per_s
 0.000,4.694e-14
