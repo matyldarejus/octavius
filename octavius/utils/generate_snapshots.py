@@ -301,7 +301,7 @@ def generate_tng_snapshot(path: Path, subfind_path: Path) -> None:
         gas.create_dataset("StarFormationRate", data=gas_specific["sfr"])
         gas.create_dataset("GFM_Metallicity", data=gas_metals[:, 0])  # scalar total metallicity
         gas.create_dataset("GFM_Metals", data=gas_metals)  # 10-element composition
-        gas.create_dataset("SubfindHsml", data=gas_specific["smoothing_length"])
+        gas.create_dataset("SubfindHsml", data=gas_specific["smoothing_length"] * h)
 
         # no masses for dm
         dm = f.create_group("PartType1")

@@ -24,7 +24,7 @@ import h5py
 
 # internal imports
 from ..version import __version__
-from ..log import get_logger
+from ..log import SAME_ON_ALL_RANKS, get_logger
 
 logger = get_logger()
 
@@ -78,7 +78,8 @@ def read_photometry_table(table_path: Path) -> PhotometryTable:
         table_version = tab.attrs["octavius_version"]
         if table_version != __version__:
             logger.warning(
-                f"Photometry table was generated with version {table_version}; you are running version {__version__}"
+                f"Photometry table was generated with version {table_version}; you are running version {__version__}",
+                extra=SAME_ON_ALL_RANKS,
             )
 
         # SSP datasets
@@ -127,7 +128,7 @@ def read_photometry_table(table_path: Path) -> PhotometryTable:
 
 
 def generate_photometry_table(
-    output_path: Path,
+    output_path: Path | str,
     imf: str = "chabrier",
     nebular_emission: bool = True,
     oversample: tuple[int, int] = (2, 2),
@@ -138,7 +139,7 @@ def generate_photometry_table(
 
     Parameters
     ----------
-    output_path: pathlib.Path
+    output_path: pathlib.Path or str
         Path object pointing to where you would like to save the photometry table.
     imf: str
         The choice of IMF to use with FSPS. All FSPS IMFs are supported (option 4, piecewise, is named "piecewise"); default: ``"chabrier"``.
@@ -148,6 +149,8 @@ def generate_photometry_table(
         The factors in [age, metallicity] by which to oversample the native FSPS grid ranges from for more accurate interpolation; will increase filesize.
     """
     import fsps  # avoid fsps being a default dependency
+
+    output_path = Path(output_path)
 
     imf_to_int = {  # conversion from the IMF names to their fsps counterparts
         "salpeter": 0,
@@ -167,7 +170,7 @@ def generate_photometry_table(
 
 
 def generate_photometry_table_from_sp(
-    output_path: Path,
+    output_path: Path | str,
     sp: fsps.StellarPopulation,
     oversample: tuple[int, int] = (2, 2),
 ) -> None:
@@ -178,7 +181,7 @@ def generate_photometry_table_from_sp(
 
     Parameters
     ----------
-    output_path: pathlib.Path
+    output_path: pathlib.Path or str
         Path object pointing to where you would like to save the photometry table.
     sp: fsps.StellarPopulation
         The StellarPopulation object you would like to use with photometry.
@@ -186,6 +189,8 @@ def generate_photometry_table_from_sp(
         The factors in [age, metallicity] by which to oversample the native FSPS grid ranges from for more accurate interpolation; will increase filesize.
     """
     import fsps
+
+    output_path = Path(output_path)
 
     if sp.params["sfh"] != 0:
         raise ValueError(f"Value of parameters sfh (current: {sp.params['sfh']}) is incompatible (required: 0).")

@@ -286,11 +286,8 @@ def detect_gas_layout(*, simulation_type: str, n_metal_columns: int | None) -> G
     Returns the gas layout of a snapshot.
 
     """
-    if simulation_type == "SIMBA":
-        name = {11: "SIMBA", 34: "SIMBA-C"}.get(n_metal_columns)
-        if name is None:
-            raise NotImplementedError(f"SIMBA snapshot with {n_metal_columns} Metallicity columns: unknown layout.")
-        return GAS_LAYOUTS[name]
+    if simulation_type == "SIMBA" and n_metal_columns == 34:
+        raise ValueError("Snapshot has 34 Metallicity columns (Simba-C): set simulation_type to SIMBA-C.")
     if simulation_type in GAS_LAYOUTS:
         return GAS_LAYOUTS[simulation_type]
     raise NotImplementedError(f"No gas layout for '{simulation_type}' (have: {', '.join(GAS_LAYOUTS)}).")

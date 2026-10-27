@@ -35,15 +35,15 @@ The output catalogue will inherit the name of the snapshot prefixed with `octavi
 
 ## General Options
 
-`simulation_type`: the format of the snapshot (`SIMBA` / `SWIFT-KIARA` / `SWIFT-EAGLE` / `SWIFT-COLIBRE` / `TNG`).
+`simulation_type`: the format of the snapshot (`SIMBA` / `SIMBA-C` / `SWIFT-KIARA` / `SWIFT-EAGLE` / `SWIFT-COLIBRE` / `TNG`).
 
-`halo_id_source`: where the halo catalogue should be parsed from (`SNAPSHOT` / `AHF` / `HBT-HERONS` / `SUBFIND`).
+`halo_id_source`: where the halo catalogue should be parsed from (`SNAPSHOT` / `AHF` / `HBT-HERONS` / `SUBFIND` / `FOF` / `SNAP_OR_FOF`). `FOF` identifies haloes with the built-in friends-of-friends finder, for snapshots without halo assignments. `SNAP_OR_FOF` uses the snapshot's halo IDs if every particle type has them, and runs `FOF` otherwise.
 
 `snapshot_path`: the filepath of the snapshot (can be overridden at runtime via command-line arguments).
 
 `output_dir`: the directory to which you would like outputs routed.
 
-`halo_catalogue_path`: the filepath of the halo catalogue (can be left blank if using snapshot IDs).
+`halo_catalogue_path`: the filepath of the halo catalogue (can be left blank if using snapshot IDs, `FOF` or `SNAP_OR_FOF`).
 
 `compress_catalogue`: whether to apply lossless GZIP compression to the catalogue (default: `True`).
 
@@ -77,6 +77,8 @@ Please note disabling a particle entirely may have unintended consequences: for 
 
 `min_stars_per_galaxy`: the minimum number of stars a cluster of baryonic particles must contain to be considered a galaxy (default: `16`).
 
+`min_gas_per_galaxy`: the minimum number of gas particles a cluster of baryonic particles must contain to be considered a galaxy, considered in tandem with `min_stars_per_galaxy` (default: `0`).
+
 `min_dm_per_halo`: the minimum number of dark matter particles a halo should contain. Haloes below this threshold are disregarded during analysis and will not appear in the catalogue (default: `24`).
 
 `nH_lim`: the density, in $n_{H} \ cm^{-3}$, above which gas is considered dense. Used to locate dense gas in the FOF6D algorithm, and to define CGM quantities for haloes (default: `0.13`).
@@ -99,6 +101,18 @@ Please note disabling a particle entirely may have unintended consequences: for 
 
 `subhalo_override`: when using halo catalogues which include subhaloes, this will make the FOF6D algorithm abide by the substructure boundaries defined by the external finder. Please see the {ref}`halo catalogue section <subhalo-info>` for more information. (default: `False`). 
 
+## FOF Halo Parameters
+
+Only used when `halo_id_source` is `FOF` (or `SNAP_OR_FOF` and the snapshot has no halo IDs). Haloes are found with a periodic 3D friends-of-friends on the DM particles; gas, stars and black holes are then assigned to the halo of their nearest DM particle within the linking length. Haloes with fewer DM particles than `min_dm_per_halo` are discarded, and FOF haloes carry no subhalo information.
+
+`halo_b`: the DM linking length as a fraction of the mean DM interparticle separation (default: `0.2`).
+
+`halo_attach_ptypes`: which baryonic particle types (`gas`, `star`, `bh`) are attached to the halo of their nearest DM particle. Unlisted types are given no halo, so they will be absent from halo properties and galaxy finding; e.g. leaving out `star` means no galaxies are found (default: all baryonic types).
+
+`write_halo_ids`: write the FOF halo IDs into the snapshot, in the format's own halo ID dataset (`FOFGroupIDs` for SWIFT, `HaloID` for SIMBA), so later runs with `SNAPSHOT` or `SNAP_OR_FOF` can skip halo finding. The datasets record `halo_b`, `min_dm_per_halo`, `halo_attach_ptypes` and the Octavius version as attributes. Haloes below `min_dm_per_halo_to_store` are not stored, so later runs cannot go below that threshold. Halo IDs which Octavius did not write are never overwritten, and if the snapshot cannot be opened for writing a warning is logged and the run continues. Not available for TNG (default: `false`).
+
+`min_dm_per_halo_to_store`: the smallest halo, in DM particles, written to the snapshot with `write_halo_ids`. It may be lower than `min_dm_per_halo` (but not higher), so that later runs can lower `min_dm_per_halo`; the current run's catalogue still only contains haloes with at least `min_dm_per_halo` DM particles (default: `min_dm_per_halo`).
+
 ## Aggregate Property Parameters
 
 `radial_quantiles`: a dictionary of quantiles (keyed by name) for enclosed mass radial profiles (default: `{"r20": 0.2, "half_mass": 0.5, "r80": 0.8}`).
@@ -106,6 +120,10 @@ Please note disabling a particle entirely may have unintended consequences: for 
 `aperture_size`: a list of the radius (or radii), in kiloparsecs, of the apertures wherein aperture masses are computed. You can specify multiple aperture sizes (default: `[30]`).
 
 `virial_factors`: a list of the overdensity threshold(s) for which halo virial quantities are computed (default: `[200, 500, 2500]`).
+
+`halo_centre`: whether to use the position and velocity vector of the particle at the minimum potential or the centre-of-mass as the reference point for the centre of each halo (default: `MIN_POT`).
+
+`distribute_halo_hydrogen`: as part of the local environment properties, assigns each galaxy a diffuse HI and H2 component determined by the closest mass-weighted distance of gas particles in the field halo which were not already assigned to galaxies (default: `False`).
 
 (photometry-parameters)=
 ## Photometry Parameters

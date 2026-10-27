@@ -25,7 +25,17 @@ logger = get_logger()
 
 # for config parsing
 CONFIG_FIELDS = frozenset(
-    {"thresholds", "physics", "fof6d", "properties", "photometry", "line_absorption", "parallelism", "logging"}
+    {
+        "thresholds",
+        "physics",
+        "fof6d",
+        "fof_haloes",
+        "properties",
+        "photometry",
+        "line_absorption",
+        "parallelism",
+        "logging",
+    }
 )
 FILEPATHS = frozenset(
     {
@@ -39,12 +49,14 @@ FILEPATHS = frozenset(
     }
 )
 CASE_SENSITIVE = frozenset({"ion_table_pattern"})
-VALID_SIM_TYPES = frozenset({"SIMBA", "SWIFT-KIARA", "SWIFT-EAGLE", "SWIFT-COLIBRE", "TNG"})
-VALID_HALO_CATS = frozenset({"SNAPSHOT", "AHF", "HBT-HERONS", "SUBFIND"})
+VALID_SIM_TYPES = frozenset({"SIMBA", "SIMBA-C", "SWIFT-KIARA", "SWIFT-EAGLE", "SWIFT-COLIBRE", "TNG"})
+VALID_HALO_CATS = frozenset({"SNAPSHOT", "AHF", "HBT-HERONS", "SUBFIND", "FOF", "SNAP_OR_FOF"})
+FOF_HALO_SOURCES = frozenset({"FOF", "SNAP_OR_FOF"})  # sources which may run the built-in FOF halo finder
 VALID_HALO_CENTRES = frozenset({"MIN_POT", "COM"})
 VALID_EXT_LAWS = frozenset({"COMPOSITE", "POWER_LAW", "CARDELLI", "CONROY", "CALZETTI", "MIX_CALZ_MW", "SMC", "LMC"})
 VALID_KERNELS = frozenset(["CUBIC", "QUINTIC"])
 VALID_VIEW_AXES = frozenset({"X", "Y", "Z"})
+BARYONIC_PTYPES = frozenset({"gas", "star", "bh"})
 VALID_GAS_CRITERIA = frozenset({"COLD", "STARFORMING", "COLD_OR_STARFORMING", "DENSE_ONLY"})
 VALID_IMPACT_UNITS = frozenset({"R200", "KPC"})
 VALID_LOS_MODES = frozenset({"SAMPLE", "RANDOM", "EXPLICIT"})
@@ -52,6 +64,7 @@ VALID_UVBS = frozenset({"HM12", "FG20"})
 ALWAYS_POSITIVE = frozenset(
     {
         "b",
+        "halo_b",
         "velocity_factor",
         "n_io_chunks",
         "interpolation_bins",
@@ -78,9 +91,9 @@ VALID_ENTRIES: dict[str, frozenset[str]] = {
 }
 
 VALID_COMBOS: dict[str, frozenset[str]] = {
-    "SWIFT": frozenset({"AHF", "SNAPSHOT", "HBT-HERONS"}),
-    "SIMBA": frozenset({"AHF", "SNAPSHOT"}),
-    "TNG": frozenset({"SUBFIND"}),
+    "SWIFT": frozenset({"AHF", "SNAPSHOT", "HBT-HERONS", "FOF", "SNAP_OR_FOF"}),
+    "SIMBA": frozenset({"AHF", "SNAPSHOT", "FOF", "SNAP_OR_FOF"}),
+    "TNG": frozenset({"SUBFIND", "FOF"}),
 }
 
 
@@ -97,8 +110,10 @@ class OctaviusConfig:
     Notes
     -----
 
-    - 'b' controls what fraction of the mean interparticle separation the linking length is. This is usually set to 0.02.
-    - 'velocity_factor' is in units of the local velocity dispersion, and controls how many standard deviations from the local velocity dispersion a particle considers its neighbours to be linked in phase space.
+    - 'halo_b' is the linking length of the built-in FOF halo finder (halo_id_source: FOF), in units of the mean DM interparticle separation. This is usually set to 0.2.
+    - 'halo_attach_ptypes' lists the baryonic ptypes which the FOF halo finder attaches to haloes (all of them if None); unlisted ptypes are given no halo.
+    - 'write_halo_ids' writes the FOF HaloIDs back into the snapshot (in its own halo ID dataset), so later runs can use halo_id_source: SNAPSHOT or SNAP_OR_FOF instead of repeating the halo finding.
+    - 'min_dm_per_halo_to_store' is the smallest halo (in DM particles) written to the snapshot with write_halo_ids; it defaults to min_dm_per_halo and may only be lower, so later runs can lower min_dm_per_halo. The analysis itself always uses min_dm_per_halo.
     - FRAD is the radiative efficiency (in the accretion formula, usually 0.1).
     - MU is the mean molecular weight (in the virial scaling formulae, usually 0.6)
     - n_io_chunks does not represent chunking through the full pipeline, rather, chunking on reading datasets. This is to alleviate stress on filesystems from multiple ranks simultaneously requesting multi-GB reads, but in practice leaving this at 10 is fine.
@@ -134,6 +149,7 @@ class OctaviusConfig:
     )
 
     min_stars_per_galaxy: int = 16
+    min_gas_per_galaxy: int = 0
     min_dm_per_halo: int = 24
 
     nH_lim: float = 0.13
@@ -151,11 +167,17 @@ class OctaviusConfig:
     aperture_size: list[int] = field(default_factory=lambda: [30])
     virial_factors: list[int] = field(default_factory=lambda: [200, 500, 2500])
     halo_centre: str = "MIN_POT"
+    distribute_halo_hydrogen: bool = False
 
     b: float = 0.02
     velocity_factor: float = 1.0
     subhalo_override: bool = False
     gas_criterion: str = "COLD_OR_STARFORMING"
+
+    halo_b: float = 0.2
+    halo_attach_ptypes: list[str] | None = None  # None attaches all baryonic ptypes
+    write_halo_ids: bool = False
+    min_dm_per_halo_to_store: int | None = None  # None means min_dm_per_halo
 
     bands: list[str] = field(default_factory=lambda: ["all"])
     extinction_law: str = "COMPOSITE"
@@ -198,6 +220,12 @@ class OctaviusConfig:
         """
         Post-initialisation validation of both sensible and valid config parameters to prevent errors at runtime.
         """
+        # auto expand Paths and coerce strings to Paths
+        for field_name in FILEPATHS:
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, Path(value).expanduser())
+
         # uppercase all strings which are expected to be uppercase
         # except for ion_table_pattern
         for f in fields(self):
@@ -211,6 +239,14 @@ class OctaviusConfig:
             if user_entered not in valid_entries:
                 raise ValueError(
                     f"'{user_entered}' is not a valid choice; please select from {', '.join(valid_entries)}."
+                )
+
+        if self.halo_attach_ptypes is not None:
+            invalid = set(self.halo_attach_ptypes) - BARYONIC_PTYPES
+            if invalid:
+                raise ValueError(
+                    f"'halo_attach_ptypes' contains {', '.join(sorted(invalid))}; "
+                    f"please select from {', '.join(sorted(BARYONIC_PTYPES))}."
                 )
 
         # fields which cannot be negative
@@ -234,6 +270,20 @@ class OctaviusConfig:
                 f"please select from {', '.join(sorted(valid_sources))}."
             )
 
+        if self.write_halo_ids and self.halo_id_source not in FOF_HALO_SOURCES:
+            raise ValueError(
+                f"'write_halo_ids' only applies to FOF halo finding, not halo_id_source '{self.halo_id_source}'."
+            )
+        if self.min_dm_per_halo_to_store is None:
+            object.__setattr__(self, "min_dm_per_halo_to_store", self.min_dm_per_halo)
+        if not 0 <= self.min_dm_per_halo_to_store <= self.min_dm_per_halo:
+            raise ValueError(
+                f"'min_dm_per_halo_to_store' ({self.min_dm_per_halo_to_store}) must be between 0 and "
+                f"'min_dm_per_halo' ({self.min_dm_per_halo})."
+            )
+        if self.write_halo_ids and sim_prefix == "TNG":
+            raise ValueError("'write_halo_ids' is not supported for TNG, whose snapshots have no halo ID datasets.")
+
         # HACK: auto-expand photometry bands for user convenience
         if self.stages.get("photometry", False) and self.photometry_table_path is not None:
             from ..photometry.photometry_tables import resolve_band_names, read_filter_names  # avoid circular import
@@ -242,14 +292,14 @@ class OctaviusConfig:
             object.__setattr__(self, "bands", resolve_band_names(self.bands, names, lambda_effs))
 
     @classmethod
-    def from_yaml(cls, config_path: Path, **overrides: Any) -> OctaviusConfig:
+    def from_yaml(cls, config_path: Path | str, **overrides: Any) -> OctaviusConfig:
         """
         Parses an octavius_config.yaml parameter file into the dataclass used internally.
         Names of entries themselves and the file layout must not be changed.
 
         Parameters
         ----------
-        config_path: pathlib.Path
+        config_path: pathlib.Path or str
             Path object pointing to the config file.
         **overrides: Any
             Any overrides to config fields specified in the YAML.
@@ -259,15 +309,12 @@ class OctaviusConfig:
         config: OctaviusConfig
             The config dataclass.
         """
+        config_path = Path(config_path)  # coerce to Path object
+
         with open(config_path, "r") as f:
             raw = safe_load(f)
 
         flat = _flatten_config(raw)
-
-        for key in FILEPATHS:
-            if key in flat and flat[key] is not None:
-                flat[key] = Path(flat[key]).expanduser()
-
         flat.update(overrides)
 
         return cls(**flat)  # keyword unpacking saves us from a 35 argument instantiation
@@ -396,6 +443,7 @@ class DatasetUnits:
     a_exponent: int = 0
 
 
+# TODO: combine CODE_UNITS and DTYPES into one central abstraction
 CODE_UNITS = {
     "pos": DatasetUnits(unit=u.kpc, a_exponent=1),  # kpc * a
     "vel": DatasetUnits(unit=(u.km / u.s)),  # peculiar
@@ -423,6 +471,7 @@ CODE_UNITS = {
     "smoothing_length": DatasetUnits(unit=u.kpc, a_exponent=1),  # ckpc
 }
 
+# TODO: allow particle float datasets to be dropped to 32-bit in config, hardcode ID datatypes
 DTYPES = {
     "particle_id": np.int64,
     "ptype": np.int8,  # this allows up to 256 ptypes
@@ -432,7 +481,6 @@ DTYPES = {
     "mass": np.float64,
     "dust_mass": np.float64,
     "rho": np.float64,
-    "smoothing_length": np.float64,
     "internal_energy": np.float64,
     "sfr": np.float64,
     "metallicity": np.float64,
@@ -442,6 +490,7 @@ DTYPES = {
     "age": np.float64,
     "bhmass": np.float64,
     "bhmdot": np.float64,
+    "smoothing_length": np.float64,
     # NOTE: external halo readers (AHF) sometimes store absurdly large integers for HIDs
     "HaloID": np.int64,
     "GalID": np.int64,
@@ -456,6 +505,7 @@ DTYPES = {
 }
 
 
+# FIXME: currently pinned to default GIZMO only
 def gadget_unit_conversion_factor(dataset: str, h: float, a: float) -> float:
     """
     Factors for converting standard GADGET units to internal code units.

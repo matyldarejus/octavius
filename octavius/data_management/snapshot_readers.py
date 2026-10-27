@@ -13,7 +13,7 @@ bespoke treatments here and there with overrides and such.
 """
 
 # type checking
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .conventions import OctaviusConstants, OctaviusConfig
@@ -54,11 +54,6 @@ def build_reader(snapshot_path: Path, constants: OctaviusConstants, config: Octa
         raise ValueError(
             f"Unsupported simulation type: '{sim_type}', currently support {', '.join(sorted(READER_MAP))}"
         )
-
-    if reader_class is SimbaReader:
-        with h5py.File(snapshot_path, "r") as f:
-            if f["PartType0/Metallicity"].shape[1] == 34:
-                reader_class = SimbaCReader
 
     logger.info(f"Using {sim_type} reader.")
     reader = reader_class(snapshot_path=snapshot_path, constants=constants, n_io_chunks=config.n_io_chunks)
@@ -108,11 +103,13 @@ class ColibreReader(SwiftReader):
     def __init__(self, snapshot_path: Path, constants: OctaviusConstants, n_io_chunks: int) -> None:
 
         super().__init__(snapshot_path, constants, n_io_chunks)
-        self.derived_columns: dict[str, Callable] = {
-            "mass_HI": self._derive_mass_HI,
-            "mass_H2": self._derive_mass_H2,
-            "dust_mass": self._derive_dust_mass,
-        }
+        self.derived_columns.update(
+            {
+                "mass_HI": self._derive_mass_HI,
+                "mass_H2": self._derive_mass_H2,
+                "dust_mass": self._derive_dust_mass,
+            }
+        )
 
     def _derive_dust_mass(self, ptype: str = "gas") -> np.ndarray:
         """
@@ -223,6 +220,12 @@ class SimbaReader(GadgetReader):
 
         return raw_halo_ids
 
+    def encode_halo_ids(self, halo_ids: np.ndarray) -> np.ndarray:
+        """
+        Maps 0-indexed HaloIDs to GIZMO's convention (1-indexed, with 0 as the sentinel).
+        """
+        return halo_ids.astype(np.int64) + 1
+
     def _derive_mass_HI(self, ptype: str = "gas") -> np.ndarray:
         """
         Converts the NeutralHydrogenAbundance (nHI/nH) to fHI (fraction of mass which is hydrogen)
@@ -256,14 +259,11 @@ class SimbaReader(GadgetReader):
 
 class SimbaCReader(SimbaReader):
     """
-    Simba-C (Chem5) stores 34 Metallicity columns instead of Simba's 11,
-    so helium is column 2, not 1.
+    Simba-C reader, which is identical to the SimbaReader bar the metallicity column convention
+    due to its enhanced chemistry library.
     """
 
-    column_indices = {
-        "helium_fraction": 2,
-        "metallicity": 0,
-    }
+    column_indices = {**SimbaReader.column_indices, "helium_fraction": 2}
 
 
 class TNGReader(GadgetReader):
@@ -425,6 +425,7 @@ class TNGReader(GadgetReader):
 
 READER_MAP: dict[str, type[SnapshotReader]] = {
     "SIMBA": SimbaReader,
+    "SIMBA-C": SimbaCReader,
     "TNG": TNGReader,
     "SWIFT-KIARA": KiaraReader,
     "SWIFT-EAGLE": EagleReader,
