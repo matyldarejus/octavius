@@ -27,7 +27,7 @@ from numba import njit
 # internal imports
 from .absorption_helpers import LineConstants, Transition
 
-LINE_DATA_PATH = Path(__file__).parent / "line_data.csv"
+LINE_DATA_PATH = Path(__file__).parent / "data" / "line_data.csv"
 SQRT_PI = math.sqrt(math.pi)
 SMALL_X_SQ = 1.0e-4
 

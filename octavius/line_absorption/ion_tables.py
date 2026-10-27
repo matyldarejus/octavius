@@ -53,8 +53,8 @@ SELF_SHIELDING_FLOOR = 1.0e-3
 
 # UV background file path
 UVB_PATHS = {  # Gamma_HI(z) tables
-    "HM12": Path(__file__).parent / "uvb_hm12.csv",
-    "FG20": Path(__file__).parent / "uvb_fg20.csv",
+    "HM12": Path(__file__).parent / "data" / "uvb_hm12.csv",
+    "FG20": Path(__file__).parent / "data" / "uvb_fg20.csv",
 }
 
 
