@@ -73,6 +73,7 @@ from octavius.line_absorption.sightlines import (
     build_sightlines,
     find_overlaps,
 )
+from octavius.line_absorption.spectrum_processing import C_KMS, FWHM_PER_SIGMA, apply_lsf, gaussian_lsf
 from octavius.run_octavius import analyse_snapshot
 from octavius.utils.generate_snapshots import generate_simba_snapshot
 
@@ -1062,3 +1063,41 @@ def test_every_line_element_is_available(name):
         if element == "H" and not layout.stores_hydrogen:
             continue  # Simba: X_H = 1 - Y - Z, no column needed
         layout.column(element)  # KeyError if a line's element is missing
+
+
+# spectrum processing
+
+
+@pytest.mark.parametrize("resolving_power", [20_000, 40_000, 50_000])
+def test_gaussian_lsf_width_matches_resolving_power(resolving_power):
+    dv = 2.5
+    kernel = gaussian_lsf(resolving_power=resolving_power, dv=dv)
+    v = (np.arange(len(kernel)) - len(kernel) // 2) * dv
+    sigma = C_KMS / resolving_power / FWHM_PER_SIGMA
+    assert kernel.sum() == pytest.approx(1.0, rel=1e-12)
+    assert np.sum(kernel * v) == pytest.approx(0.0, abs=1e-12)  # centred on the middle pixel
+    assert np.sum(kernel * v**2) == pytest.approx(sigma**2 + dv**2 / 12, rel=1e-4)  # pixels add dv^2 / 12
+
+
+def test_apply_lsf_conserves_equivalent_width():
+    v = np.arange(400) * 2.5
+    flux = np.exp(-2.0 * np.exp(-(((v - 5.0) / 10.0) ** 2)))[None, :]  # line at the box edge, so its LSF wraps
+    smoothed = apply_lsf(flux=flux, kernel=gaussian_lsf(resolving_power=20_000, dv=2.5))
+    np.testing.assert_allclose(np.sum(1.0 - smoothed), np.sum(1.0 - flux), rtol=1e-12)
+    assert smoothed.min() > flux.min()  # the line gets shallower
+
+
+def test_apply_lsf_turns_one_absorbed_pixel_into_the_kernel():
+    kernel = gaussian_lsf(resolving_power=40_000, dv=2.5)
+    half = len(kernel) // 2
+    flux = np.ones((1, 100))
+    flux[0, 0] = 0.0  # absorbed pixel at the box edge
+    expected = np.zeros(100)
+    expected[np.arange(-half, half + 1) % 100] = kernel
+    np.testing.assert_allclose(1.0 - apply_lsf(flux=flux, kernel=kernel)[0], expected, atol=1e-15)
+
+
+def test_apply_lsf_rejects_kernel_wider_than_spectrum():
+    kernel = gaussian_lsf(resolving_power=20_000, dv=2.5)
+    with pytest.raises(ValueError, match="wider than the spectrum"):
+        apply_lsf(flux=np.ones((1, len(kernel) - 1)), kernel=kernel)
