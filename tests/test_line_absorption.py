@@ -73,7 +73,16 @@ from octavius.line_absorption.sightlines import (
     build_sightlines,
     find_overlaps,
 )
-from octavius.line_absorption.spectrum_processing import C_KMS, FWHM_PER_SIGMA, apply_lsf, gaussian_lsf
+from octavius.line_absorption.spectrum_processing import (
+    C_KMS,
+    ECHELLE_REFERENCE_WAVELENGTH,
+    FWHM_PER_SIGMA,
+    TABULATED_LSFS,
+    apply_lsf,
+    gaussian_lsf,
+    load_tabulated_lsf,
+    tabulated_lsf,
+)
 from octavius.run_octavius import analyse_snapshot
 from octavius.utils.generate_snapshots import generate_simba_snapshot
 
@@ -1101,3 +1110,51 @@ def test_apply_lsf_rejects_kernel_wider_than_spectrum():
     kernel = gaussian_lsf(resolving_power=20_000, dv=2.5)
     with pytest.raises(ValueError, match="wider than the spectrum"):
         apply_lsf(flux=np.ones((1, len(kernel) - 1)), kernel=kernel)
+
+
+@pytest.mark.parametrize("grating", sorted(TABULATED_LSFS))
+def test_tabulated_lsf_is_centred_and_normalised(grating):
+    channels, relwave, table = load_tabulated_lsf(grating=grating)
+    wavelength = channels.mean()
+    profile = table[:, np.argmin(np.abs(channels - wavelength))]
+    table_centroid = C_KMS * np.sum(relwave * profile) / np.sum(profile)  # some tables are asymmetric (e.g. COS G140L)
+    table_centroid /= ECHELLE_REFERENCE_WAVELENGTH.get(grating, wavelength)
+
+    kernel = tabulated_lsf(grating=grating, wavelength_obs=wavelength, dv=2.5)
+    v = (np.arange(len(kernel)) - len(kernel) // 2) * 2.5
+    assert len(kernel) % 2 == 1 and np.all(kernel >= 0.0)
+    assert kernel.sum() == pytest.approx(1.0, rel=1e-12)
+    assert np.sum(kernel * v) == pytest.approx(table_centroid, abs=0.25)  # no shift from the pixel construction
+
+
+def test_cos_g160m_channels_come_from_the_table():
+    channels, _, _ = load_tabulated_lsf(grating="COS_G160M")
+    np.testing.assert_array_equal(channels, np.arange(1450.0, 1751.0, 50.0))  # pygad lists 1150-1450
+
+
+@pytest.mark.parametrize(
+    ("grating", "wavelength_obs", "pixel_angstrom"),
+    [  # source: https://hst-docs.stsci.edu/stisihb/chapter-4-spectroscopy/4-1-overview#id-4.1Overview-Table4.1
+        ("STIS_G140M", 1300.0, 0.05),  # STIS IHB Table 4.1: 0.05 A per pixel
+        ("STIS_E140M", 1430.5, 1430.5 / 91_700),  # lambda / 91,700 per pixel, at the table's reference wavelength
+        ("STIS_E230M", 2340.0, 2340.0 / 60_000),  # lambda / 60,000 per pixel
+    ],
+)
+def test_tabulated_lsf_fwhm_is_one_to_two_detector_pixels(grating, wavelength_obs, pixel_angstrom):
+    dv = 0.1
+    kernel = tabulated_lsf(grating=grating, wavelength_obs=wavelength_obs, dv=dv)
+    fwhm = dv * np.sum(kernel >= 0.5 * kernel.max())
+    pixel_kms = C_KMS * pixel_angstrom / wavelength_obs
+    assert pixel_kms < fwhm < 2.0 * pixel_kms  # R = lambda / (2 dlambda) is the two-pixel element
+
+
+def kernel_variance(kernel: np.ndarray, dv: float) -> float:
+    v = (np.arange(len(kernel)) - len(kernel) // 2) * dv
+    return np.sum(kernel * v**2)
+
+
+def test_first_order_lsf_scales_with_wavelength_and_echelle_does_not():
+    cos = [kernel_variance(tabulated_lsf(grating="COS_G130M", wavelength_obs=w, dv=0.1), 0.1) for w in (1290.0, 1310.0)]
+    assert cos[0] / cos[1] == pytest.approx((1310.0 / 1290.0) ** 2, rel=1e-3)  # fixed in A: v width ~ 1 / lambda
+    echelle = [tabulated_lsf(grating="STIS_E140M", wavelength_obs=w, dv=0.1) for w in (1250.0, 1340.0)]
+    np.testing.assert_array_equal(echelle[0], echelle[1])  # same channel, fixed in velocity
