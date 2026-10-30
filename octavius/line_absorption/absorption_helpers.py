@@ -176,13 +176,15 @@ class SightlineParticles:
 class SightlineSpectra:
     """
 
-    Optical depth along one sightline set for one transition, before any instrument effects.
+    Optical depth along one sightline set for one transition, and its flux through the
+    instrument's LSF.
 
     """
 
     line: str  # transition name
     velocity: np.ndarray  # (n_bins,) km/s
     tau: np.ndarray  # (n_los, n_bins)
+    flux: np.ndarray  # (n_los, n_bins) exp(-tau) convolved with the LSF
     weighted: dict[str, np.ndarray]  # quantity to tau-weighted mean (0 where tau = 0)
     member_column: np.ndarray
 
@@ -222,7 +224,7 @@ class GasLayout:
     def stores_hydrogen(self) -> bool:
         """
 
-        True if X_H is its own column; otherwise calculate X_H = Y - Z.
+        True if X_H is its own column; otherwise calculate X_H = 1 - Y - Z.
 
         """
         return "H" in self.metal_columns

@@ -29,8 +29,8 @@ C_KMS = codata.c.to(u.km / u.s).value
 FWHM_PER_SIGMA = 2.0 * math.sqrt(2.0 * math.log(2.0))
 N_LSF_SIGMA = 5.0  # no. gaussian standard deviations
 
-PYGAD_LSF_DIR = Path(__file__).parent / "data" / "lsf" / "original"
-TABULATED_LSFS = frozenset(
+LEGACY_LSF_DIR = Path(__file__).parent / "data" / "lsf" / "legacy"
+LEGACY_LSFS = frozenset(
     {
         "COS_G130M",
         "COS_G140L",
@@ -46,9 +46,49 @@ TABULATED_LSFS = frozenset(
     }
 )
 
+STSCI_LSF_DIR = Path(__file__).parent / "data" / "lsf" / "stsci_cos"
+# COS2025 Cycle 33 settings (or the newest published LP where the default is unpublished)
+# in order of preference, first setting chosen will be the one which covers wavelength_obs
+COS2025_LSFS = (
+    "COS_G130M_1291_LP5",
+    "COS_G130M_1300_LP5",
+    "COS_G130M_1309_LP5",
+    "COS_G130M_1318_LP5",
+    "COS_G130M_1327_LP5",
+    "COS_G130M_1222_LP4",
+    "COS_G130M_1096_LP2",
+    "COS_G130M_1055_LP2",
+    "COS_G160M_1600_LP6",
+    "COS_G160M_1577_LP6",
+    "COS_G160M_1589_LP6",
+    "COS_G160M_1611_LP6",
+    "COS_G160M_1623_LP6",
+    "COS_G160M_1533_LP6",
+    "COS_G140L_1280_LP3",
+    "COS_G140L_1105_LP3",
+    "COS_G140L_800_LP4",
+)
+
 # echelle tables are tabulated in angstrom at a single wavelenght, but the true LSF is fixed in velocity
 # hence, when converting to velocity, reference wavelength needs to be used instead of spectrum's own wavelength
 ECHELLE_REFERENCE_WAVELENGTH = {"STIS_E140M": 1430.5, "STIS_E140H": 1425.0, "STIS_E230M": 2340.0, "STIS_E230H": 2377.0}
+
+
+def lsf_kernel(*, lsf: str, dv: float, wavelength_obs: float, resolving_power: float) -> np.ndarray:
+    """
+
+    Returns the LSF kernel named in the config, on a velocity grid of pixel width dv; kernel of ones for NONE,
+    a Gaussian with resolving power R for GAUSSIAN, or the tabulated LSF of a grating at wavelength_obs in Angstrom.
+
+    """
+    if lsf == "NONE":
+        return np.ones(1)
+    if lsf == "GAUSSIAN":
+        return gaussian_lsf(resolving_power=resolving_power, dv=dv)
+    if lsf == "COS":
+        lsf = cos_setting(wavelength_obs=wavelength_obs)
+        logger.info(f"COS setting {lsf} for {wavelength_obs:.1f} A.")
+    return tabulated_lsf(grating=lsf, wavelength_obs=wavelength_obs, dv=dv)
 
 
 def gaussian_lsf(*, resolving_power: float, dv: float) -> np.ndarray:
@@ -82,7 +122,7 @@ def apply_lsf(*, flux: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return convolve1d(flux, kernel, axis=-1, mode="wrap")
 
 
-def load_tabulated_lsf(*, grating: str, directory: Path = PYGAD_LSF_DIR) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_tabulated_lsf(*, grating: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
 
     Reads a tabulated LSF.
@@ -94,11 +134,41 @@ def load_tabulated_lsf(*, grating: str, directory: Path = PYGAD_LSF_DIR) -> tupl
         - table: LSF values, one column per channel
 
     """
-    with (directory / f"lsf_{grating.lower()}.csv").open() as f:
+    path = STSCI_LSF_DIR / f"lsf_{grating.lower()}.csv"
+    if not path.exists():
+        path = LEGACY_LSF_DIR / f"lsf_{grating.lower()}.csv"
+    with path.open() as f:
         rows = [line for line in f if not line.startswith("#")]
     channels = np.array(rows[0].split(",")[1:], dtype=float)
     values = np.loadtxt(rows[1:], delimiter=",")
     return channels, values[:, 0], values[:, 1:]
+
+
+def _covers(channels: np.ndarray, wavelength: float) -> bool:
+    """
+
+    True if wavelength lies within the tabulated range and within one channel spacing of a channel
+    (i.e. not in a detector gap).
+
+    """
+    spacing = np.min(np.diff(channels)) if len(channels) > 1 else np.inf
+    inside = channels[0] <= wavelength <= channels[-1]
+    return bool(inside and np.min(np.abs(channels - wavelength)) <= spacing)
+
+
+def cos_setting(*, wavelength_obs: float) -> str:
+    """
+
+    Returns first COS2025 setting whose channels cover wavelength_obs, otherwise the setting
+    with the nearest channel.
+
+    """
+    channels = [load_tabulated_lsf(grating=name)[0] for name in COS2025_LSFS]
+    for name, setting_channels in zip(COS2025_LSFS, channels):
+        if _covers(setting_channels, wavelength_obs):
+            return name
+    nearest = np.argmin([np.min(np.abs(c - wavelength_obs)) for c in channels])
+    return COS2025_LSFS[nearest]
 
 
 def tabulated_lsf(*, grating: str, wavelength_obs: float, dv: float) -> np.ndarray:
@@ -114,10 +184,10 @@ def tabulated_lsf(*, grating: str, wavelength_obs: float, dv: float) -> np.ndarr
 
     """
     channels, relwave, table = load_tabulated_lsf(grating=grating)
-    if not channels[0] <= wavelength_obs <= channels[-1]:
+    if not _covers(channels, wavelength_obs):
         logger.warning(
-            f"{grating}: {wavelength_obs:.1f} A outside the tabulated channels"
-            f"({channels[0]:.0f}-{channels[-1]:.0f}); using the closest edge."
+            f"{grating}: {wavelength_obs:.1f} A is outside the tabulated channels ({channels[0]:.0f}-{channels[-1]:.0f} A) "
+            f"or in a detector gap; using the nearest channel."
         )
     profile = table[:, np.argmin(np.abs(channels - wavelength_obs))]
 

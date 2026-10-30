@@ -95,6 +95,8 @@ line_absorption:
   # spectra
   absorption_lines:           [OVI1031]             # any lines listed in line_data.csv
   absorption_pixel_kms:       2.5
+  absorption_lsf:             GAUSSIAN              # none, gaussian, or tabulated (e.g. cos_g130m)
+  absorption_resolving_power: 40000                # for gaussian lsf; HWO baseline (Dressing et al. (2026))
 
 parallelism:
   n_io_chunks:        10    # for IO reads on datasets, not chunking the pipeline

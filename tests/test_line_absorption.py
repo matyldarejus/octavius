@@ -75,9 +75,10 @@ from octavius.line_absorption.sightlines import (
 )
 from octavius.line_absorption.spectrum_processing import (
     C_KMS,
+    COS2025_LSFS,
     ECHELLE_REFERENCE_WAVELENGTH,
     FWHM_PER_SIGMA,
-    TABULATED_LSFS,
+    LEGACY_LSFS,
     apply_lsf,
     gaussian_lsf,
     load_tabulated_lsf,
@@ -614,6 +615,12 @@ def test_run_absorption_synthesises_spectra(absorption_run, tmp_path):
     for name, spectrum in spectra.items():
         dv = spectrum.velocity[1] - spectrum.velocity[0]
         assert spectrum.tau.shape == (sightlines.n_los, len(spectrum.velocity))
+        assert spectrum.flux.shape == spectrum.tau.shape
+        assert np.all((spectrum.flux >= 0.0) & (spectrum.flux <= 1.0))
+        np.testing.assert_allclose(
+            (1.0 - spectrum.flux).sum(axis=1), (1.0 - np.exp(-spectrum.tau)).sum(axis=1), atol=1e-12
+        )
+
         assert len(spectrum.velocity) * dv == pytest.approx(sightlines.vbox)  # check that pixels tile the box
         assert np.all(spectrum.tau >= 0.0) and len(spectrum.member_column) == len(particles.los_members)
         assert set(spectrum.weighted) == {"temperature", "rho", "metallicity", "v_pec"}
@@ -1112,7 +1119,7 @@ def test_apply_lsf_rejects_kernel_wider_than_spectrum():
         apply_lsf(flux=np.ones((1, len(kernel) - 1)), kernel=kernel)
 
 
-@pytest.mark.parametrize("grating", sorted(TABULATED_LSFS))
+@pytest.mark.parametrize("grating", sorted(LEGACY_LSFS | set(COS2025_LSFS) | {"COS_G130M_1291_LP1"}))
 def test_tabulated_lsf_is_centred_and_normalised(grating):
     channels, relwave, table = load_tabulated_lsf(grating=grating)
     wavelength = channels.mean()
@@ -1158,3 +1165,18 @@ def test_first_order_lsf_scales_with_wavelength_and_echelle_does_not():
     assert cos[0] / cos[1] == pytest.approx((1310.0 / 1290.0) ** 2, rel=1e-3)  # fixed in A: v width ~ 1 / lambda
     echelle = [tabulated_lsf(grating="STIS_E140M", wavelength_obs=w, dv=0.1) for w in (1250.0, 1340.0)]
     np.testing.assert_array_equal(echelle[0], echelle[1])  # same channel, fixed in velocity
+
+
+@pytest.mark.parametrize(
+    ("grating", "wavelength_obs", "r_min", "r_max"),
+    [  # source: https://hst-docs.stsci.edu/cosdhb/chapter-1-cos-overview/1-1-instrument-capabilities-and-design
+        ("COS_G130M_1291_LP5", 1300.0, 12_000, 17_000),  # Table 1.1
+        ("COS_G160M_1600_LP6", 1600.0, 13_000, 20_000),
+        ("COS_G140L_1280_LP3", 1500.0, 1_500, 4_000),
+    ],
+)
+def test_cos_lsf_fwhm_matches_the_handbook(grating, wavelength_obs, r_min, r_max):
+    dv = 0.5
+    kernel = tabulated_lsf(grating=grating, wavelength_obs=wavelength_obs, dv=dv)
+    fwhm = dv * np.sum(kernel >= 0.5 * kernel.max())
+    assert C_KMS / r_max < fwhm < C_KMS / r_min

@@ -42,6 +42,11 @@ from .absorption_helpers import (
     detect_gas_layout,
     plane_axes,
 )
+from .spectrum_processing import (
+    C_KMS,
+    apply_lsf,
+    lsf_kernel,
+)
 from .ion_tables import DEFAULT_BARYON_FRACTION, hydrogen_number_density, ion_counts, ion_fraction, load_ion_table
 from .line_profiles import line_constants, load_line_table
 from .sightlines import (
@@ -500,7 +505,7 @@ def _synthesise_spectra(
     if layout.stores_hydrogen:
         hydrogen_fraction = metals[:, layout.column("H")]
     else:
-        hydrogen_fraction = 1.0 - metals[:, layout.column("He")]
+        hydrogen_fraction = 1.0 - metals[:, layout.column("He")] - metals[:, layout.column("Z")]
     n_H = hydrogen_number_density(density=gas["rho"], hydrogen_fraction=hydrogen_fraction)
     baryon_fraction = layout.baryon_fraction if layout.baryon_fraction is not None else DEFAULT_BARYON_FRACTION
 
@@ -534,7 +539,7 @@ def _synthesise_spectra(
 
         for k, (sightlines, particles) in enumerate(zip(sightline_sets, sightline_particles)):
             spectra[k][name] = _sightline_set_spectrum(
-                name=name,
+                transition=transition,
                 sightlines=sightlines,
                 particles=particles,
                 gas=gas,
@@ -543,7 +548,8 @@ def _synthesise_spectra(
                 kernel_table=kernel_table,
                 scale_factor=scale_factor,
                 hubble=hubble,
-                pixel_kms=config.absorption_pixel_kms,
+                redshift=redshift,
+                config=config,
             )
         logger.info(f"Synthesised {name} for {sum(s.n_los for s in sightline_sets)} sightlines.")
 
@@ -551,12 +557,14 @@ def _synthesise_spectra(
 
 
 def _sightline_set_spectrum(
-    *, name, sightlines, particles, gas, rows, constants, kernel_table, scale_factor, hubble, pixel_kms
+    *, transition, sightlines, particles, gas, rows, constants, kernel_table, scale_factor, hubble, redshift, config
 ) -> SightlineSpectra:
     """
 
     Takes one line along one sightline set: the set's particles projected on its plane axes, line centres from the
     Hubble flow and peculiar velocities along its axis, then computes optical_depth.
+
+    Then, passes exp(-tau) through the LSF channel chosen at the box centre's observed wavelength.
 
     """
     los_axis = sightlines.los_axis
@@ -568,7 +576,7 @@ def _sightline_set_spectrum(
     )
     # average over each pixel
     weights = np.column_stack([gas["temperature"][rows], gas["rho"][rows], gas["metals"][rows, 0], v_pec])
-    n_bins, dv = velocity_grid(vbox=sightlines.vbox, pixel_kms=pixel_kms)  # pixel grid
+    n_bins, dv = velocity_grid(vbox=sightlines.vbox, pixel_kms=config.absorption_pixel_kms)  # pixel grid
 
     tau, weighted, member_column = optical_depth(
         sightlines.pos[:, 0],
@@ -589,10 +597,19 @@ def _sightline_set_spectrum(
         constants,
         kernel_table,
     )
+
+    wavelength_obs = transition.wavelength * (1.0 + redshift) * (1.0 + sightlines.vbox / (2.0 * C_KMS))
+    kernel = lsf_kernel(
+        lsf=config.absorption_lsf,
+        dv=dv,
+        wavelength_obs=wavelength_obs,
+        resolving_power=config.absorption_resolving_power,
+    )
     return SightlineSpectra(
-        line=name,
+        line=transition.name,
         velocity=(np.arange(n_bins) + 0.5) * dv,
         tau=tau,
+        flux=apply_lsf(flux=np.exp(-tau), kernel=kernel),
         weighted={quantity: weighted[:, w] for w, quantity in enumerate(WEIGHTED_QUANTITIES)},
         member_column=member_column,
     )

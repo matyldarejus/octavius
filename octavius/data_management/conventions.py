@@ -61,6 +61,44 @@ VALID_GAS_CRITERIA = frozenset({"COLD", "STARFORMING", "COLD_OR_STARFORMING", "D
 VALID_IMPACT_UNITS = frozenset({"R200", "KPC"})
 VALID_LOS_MODES = frozenset({"SAMPLE", "RANDOM", "EXPLICIT"})
 VALID_UVBS = frozenset({"HM12", "FG20"})
+VALID_LSFS = frozenset(
+    {
+        "NONE",
+        "GAUSSIAN",
+        "COS",  # automatic COS2025 setting per line
+        # legacy HST tables (ported from pygad) for explicit definition
+        "COS_G130M",
+        "COS_G140L",
+        "COS_G160M",
+        "STIS_E140H",
+        "STIS_E140M",
+        "STIS_E230H",
+        "STIS_E230M",
+        "STIS_G140L",
+        "STIS_G140M",
+        "STIS_G230L",
+        "STIS_G230M",
+        # STScI COS tables (COS2025 Cycle 33 settings, plus LP1 for comparison)
+        "COS_G130M_1055_LP2",
+        "COS_G130M_1096_LP2",
+        "COS_G130M_1222_LP4",
+        "COS_G130M_1291_LP1",
+        "COS_G130M_1291_LP5",
+        "COS_G130M_1300_LP5",
+        "COS_G130M_1309_LP5",
+        "COS_G130M_1318_LP5",
+        "COS_G130M_1327_LP5",
+        "COS_G140L_800_LP4",
+        "COS_G140L_1105_LP3",
+        "COS_G140L_1280_LP3",
+        "COS_G160M_1533_LP6",
+        "COS_G160M_1577_LP6",
+        "COS_G160M_1589_LP6",
+        "COS_G160M_1600_LP6",
+        "COS_G160M_1611_LP6",
+        "COS_G160M_1623_LP6",
+    }
+)
 ALWAYS_POSITIVE = frozenset(
     {
         "b",
@@ -74,6 +112,7 @@ ALWAYS_POSITIVE = frozenset(
         "absorption_chunk_size",
         "n_random_los",
         "absorption_pixel_kms",
+        "absorption_resolving_power",
     }
 )
 
@@ -88,6 +127,7 @@ VALID_ENTRIES: dict[str, frozenset[str]] = {
     "absorption_los_axis": VALID_VIEW_AXES,
     "absorption_los_mode": VALID_LOS_MODES,
     "absorption_uvb": VALID_UVBS,
+    "absorption_lsf": VALID_LSFS,
 }
 
 VALID_COMBOS: dict[str, frozenset[str]] = {
@@ -207,6 +247,8 @@ class OctaviusConfig:
     absorption_self_shielding: bool = True
     absorption_lines: list[str] = field(default_factory=lambda: ["OVI1031"])
     absorption_pixel_kms: float = 2.5
+    absorption_lsf: str = "GAUSSIAN"
+    absorption_resolving_power: float = 40000.0
 
     terminal_output_level: str = "INFO"
     keep_logs: bool = False
