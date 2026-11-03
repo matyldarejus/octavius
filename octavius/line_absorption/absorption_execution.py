@@ -44,6 +44,7 @@ from .absorption_helpers import (
 )
 from .spectrum_processing import (
     C_KMS,
+    add_noise,
     apply_lsf,
     lsf_kernel,
 )
@@ -514,7 +515,7 @@ def _synthesise_spectra(
 
     # synthesise spectra
     spectra: list[dict[str, SightlineSpectra]] = [{} for _ in sightline_sets]
-    for name in config.absorption_lines:
+    for line_index, name in enumerate(config.absorption_lines):
         transition = lines[name]
         constants = line_constants(transition=transition)
         element_fraction = (
@@ -549,6 +550,7 @@ def _synthesise_spectra(
                 scale_factor=scale_factor,
                 hubble=hubble,
                 redshift=redshift,
+                seed=[config.absorption_seed, k, line_index],
                 config=config,
             )
         logger.info(f"Synthesised {name} for {sum(s.n_los for s in sightline_sets)} sightlines.")
@@ -557,7 +559,19 @@ def _synthesise_spectra(
 
 
 def _sightline_set_spectrum(
-    *, transition, sightlines, particles, gas, rows, constants, kernel_table, scale_factor, hubble, redshift, config
+    *,
+    transition,
+    sightlines,
+    particles,
+    gas,
+    rows,
+    constants,
+    kernel_table,
+    scale_factor,
+    hubble,
+    redshift,
+    seed,
+    config,
 ) -> SightlineSpectra:
     """
 
@@ -605,11 +619,15 @@ def _sightline_set_spectrum(
         wavelength_obs=wavelength_obs,
         resolving_power=config.absorption_resolving_power,
     )
+
+    flux = apply_lsf(flux=np.exp(-tau), kernel=kernel)
+    if config.absorption_snr is not None:
+        flux = add_noise(flux=flux, snr=config.absorption_snr, seed=seed)
     return SightlineSpectra(
         line=transition.name,
         velocity=(np.arange(n_bins) + 0.5) * dv,
         tau=tau,
-        flux=apply_lsf(flux=np.exp(-tau), kernel=kernel),
+        flux=flux,
         weighted={quantity: weighted[:, w] for w, quantity in enumerate(WEIGHTED_QUANTITIES)},
         member_column=member_column,
     )

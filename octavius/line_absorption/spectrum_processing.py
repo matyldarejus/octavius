@@ -197,3 +197,18 @@ def tabulated_lsf(*, grating: str, wavelength_obs: float, dv: float) -> np.ndarr
     edges = (np.arange(-n_half, n_half + 2) - 0.5) * dv
     kernel = np.diff(np.interp(edges, v_table, cumulative))
     return kernel / kernel.sum()
+
+
+def add_noise(*, flux: np.ndarray, snr: np.ndarray, seed: list[int]) -> np.ndarray:
+    """
+
+    Adds Guassian noise of standard deviation sigma to each spectrum, i.e. rows of flux. Every row
+    draws from its own generator, such that noise does not depend on how many others are computed and
+    in what order.
+
+    """
+    noisy = np.empty_like(flux)
+    for los in range(flux.shape[0]):
+        rng = np.random.default_rng([*seed, los])
+        noisy[los] = flux[los] + rng.standard_normal(flux.shape[1]) / snr
+    return noisy

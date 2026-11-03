@@ -249,6 +249,7 @@ class OctaviusConfig:
     absorption_pixel_kms: float = 2.5
     absorption_lsf: str = "GAUSSIAN"
     absorption_resolving_power: float = 40000.0
+    absorption_snr: float | None = 30.0
 
     terminal_output_level: str = "INFO"
     keep_logs: bool = False
@@ -332,6 +333,9 @@ class OctaviusConfig:
 
             names, lambda_effs = read_filter_names(self.photometry_table_path)
             object.__setattr__(self, "bands", resolve_band_names(self.bands, names, lambda_effs))
+
+        if self.absorption_snr is not None and self.absorption_snr <= 0:
+            raise ValueError("'absorption_snr' must be positive, or blank for no noise.")
 
     @classmethod
     def from_yaml(cls, config_path: Path | str, **overrides: Any) -> OctaviusConfig:

@@ -79,6 +79,7 @@ from octavius.line_absorption.spectrum_processing import (
     ECHELLE_REFERENCE_WAVELENGTH,
     FWHM_PER_SIGMA,
     LEGACY_LSFS,
+    add_noise,
     apply_lsf,
     gaussian_lsf,
     load_tabulated_lsf,
@@ -608,6 +609,7 @@ def test_run_absorption_synthesises_spectra(absorption_run, tmp_path):
         absorption_lines=["OVI1031", "H1215"],
         ion_table_dir=tmp_path,
         ion_table_pattern=TABLE_PATTERN,
+        absorption_snr=None,
     )
     ((sightlines, particles, spectra),) = run_absorption(config=config)
 
@@ -1180,3 +1182,18 @@ def test_cos_lsf_fwhm_matches_the_handbook(grating, wavelength_obs, r_min, r_max
     kernel = tabulated_lsf(grating=grating, wavelength_obs=wavelength_obs, dv=dv)
     fwhm = dv * np.sum(kernel >= 0.5 * kernel.max())
     assert C_KMS / r_max < fwhm < C_KMS / r_min
+
+
+def test_noise_has_standard_deviation_one_over_snr():
+    flux = np.full((100, 4000), 0.25)
+    residual = add_noise(flux=flux, snr=30.0, seed=[1, 0, 0]) - flux
+    assert residual.std() == pytest.approx(1.0 / 30.0, rel=1e-2)  # 4e5 draws: std known to ~0.1%
+
+
+def test_noise_is_reproducible_and_independent_of_other_spectra():
+    flux = np.ones((10, 500))
+    noisy = add_noise(flux=flux, snr=30.0, seed=[1, 0, 0])
+    np.testing.assert_array_equal(noisy, add_noise(flux=flux, snr=30.0, seed=[1, 0, 0]))  # same seed
+    np.testing.assert_array_equal(noisy[:5], add_noise(flux=flux[:5], snr=30.0, seed=[1, 0, 0]))  # batch size
+    assert not np.array_equal(noisy, add_noise(flux=flux, snr=30.0, seed=[1, 0, 1]))  # another line
+    assert not np.array_equal(noisy[0], noisy[1])  # another sightline
