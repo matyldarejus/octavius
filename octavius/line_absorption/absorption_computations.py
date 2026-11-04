@@ -25,6 +25,8 @@ N_LOS_STEPS = 128  # Simpson sub-intervals along the line of sight
 N_DOPPLER_WIDTHS = 6.0  # Gaussian core window
 TAU_WING_FLOOR = 1.0e-6  # value below which particle's wing tau must fall down to to exclude it
 
+N90_FEW = 5  # threshold below which absorption comes from too few particles to be effectively resolved
+
 
 @njit(cache=True)
 def kernel_3d(q, kernel_id):
@@ -247,3 +249,29 @@ def optical_depth(
                 tau[los, k] *= line.xsec / dv
 
     return tau, weighted, member_column
+
+
+@njit(parallel=True, cache=True)
+def column_n90(los_offsets, member_column):
+    """
+
+    Counts the number of particles which make up 90% of the sightline's absorption column density, counting the largest
+    contributions first.
+
+    For sightlines with no column, returns -1 sentinel.
+
+    """
+    n_los = los_offsets.shape[0] - 1
+    n90 = np.full(n_los, -1, dtype=np.int64)
+    for los in prange(n_los):
+        columns = np.sort(member_column[los_offsets[los] : los_offsets[los + 1]])[::-1]
+        total = columns.sum()
+        if total <= 0.0:
+            continue
+        running = 0.0
+        for count in range(columns.shape[0]):
+            running += columns[count]
+            if running >= 0.9 * total:
+                n90[los] = count + 1
+                break
+    return n90

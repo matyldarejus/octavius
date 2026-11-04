@@ -187,6 +187,7 @@ class SightlineSpectra:
     flux: np.ndarray  # (n_los, n_bins) exp(-tau) convolved with the LSF
     weighted: dict[str, np.ndarray]  # quantity to tau-weighted mean (0 where tau = 0)
     member_column: np.ndarray
+    n90: np.ndarray  # (n_los,) particles making up 90% of the column
 
     @property
     def n_los(self) -> int:

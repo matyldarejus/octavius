@@ -25,6 +25,7 @@ from octavius.data_management.conventions import OctaviusConfig
 from octavius.line_absorption import run_absorption
 from octavius.line_absorption.absorption_computations import (
     build_projected_kernel_table,
+    column_n90,
     kernel_3d,
     optical_depth,
     projected_kernel,
@@ -1197,3 +1198,9 @@ def test_noise_is_reproducible_and_independent_of_other_spectra():
     np.testing.assert_array_equal(noisy[:5], add_noise(flux=flux[:5], snr=30.0, seed=[1, 0, 0]))  # batch size
     assert not np.array_equal(noisy, add_noise(flux=flux, snr=30.0, seed=[1, 0, 1]))  # another line
     assert not np.array_equal(noisy[0], noisy[1])  # another sightline
+
+
+def test_n90_counts_particles_making_up_ninety_percent_of_the_column():
+    los_offsets = np.array([0, 4, 5, 5, 7])
+    member_column = np.array([0.5, 5.0, 1.5, 3.0, 2.0, 0.0, 0.0])
+    np.testing.assert_array_equal(column_n90(los_offsets, member_column), [3, 1, -1, -1])

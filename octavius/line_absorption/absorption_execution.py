@@ -25,7 +25,9 @@ from ..data_management.parallel_reading import generate_read_plan
 from ..log import get_logger
 from ..utils import load_catalogue
 from .absorption_computations import (
+    N90_FEW,
     build_projected_kernel_table,
+    column_n90,
     line_of_sight_velocities,
     optical_depth,
     velocity_grid,
@@ -553,7 +555,10 @@ def _synthesise_spectra(
                 seed=[config.absorption_seed, k, line_index],
                 config=config,
             )
-        logger.info(f"Synthesised {name} for {sum(s.n_los for s in sightline_sets)} sightlines.")
+        n_few = sum(int(np.sum((s[name].n90 >= 0) & (s[name].n90 < N90_FEW))) for s in spectra)
+        logger.info(
+            f"Synthesised {name} for {sum(s.n_los for s in sightline_sets)} sightlines ({n_few} with n90 < {N90_FEW})."
+        )
 
     return spectra
 
@@ -630,6 +635,7 @@ def _sightline_set_spectrum(
         flux=flux,
         weighted={quantity: weighted[:, w] for w, quantity in enumerate(WEIGHTED_QUANTITIES)},
         member_column=member_column,
+        n90=column_n90(particles.los_offsets, member_column),
     )
 
 
