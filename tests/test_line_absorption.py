@@ -618,7 +618,7 @@ def test_run_absorption_synthesises_spectra(absorption_run, tmp_path):
         dv = spectrum.velocity[1] - spectrum.velocity[0]
         assert spectrum.tau.shape == (sightlines.n_los, len(spectrum.velocity))
         assert spectrum.flux.shape == spectrum.tau.shape
-        assert np.all((spectrum.flux >= 0.0) & (spectrum.flux <= 1.0))
+        assert np.all((spectrum.flux >= -1e-12) & (spectrum.flux <= 1.0 + 1e-12))
         np.testing.assert_allclose(
             (1.0 - spectrum.flux).sum(axis=1), (1.0 - np.exp(-spectrum.tau)).sum(axis=1), atol=1e-12
         )
@@ -1112,7 +1112,7 @@ def test_apply_lsf_turns_one_absorbed_pixel_into_the_kernel():
     flux[0, 0] = 0.0  # absorbed pixel at the box edge
     expected = np.zeros(100)
     expected[np.arange(-half, half + 1) % 100] = kernel
-    np.testing.assert_allclose(1.0 - apply_lsf(flux=flux, kernel=kernel)[0], expected, atol=1e-15)
+    np.testing.assert_allclose(1.0 - apply_lsf(flux=flux, kernel=kernel)[0], expected, atol=1e-12)
 
 
 def test_apply_lsf_rejects_kernel_wider_than_spectrum():

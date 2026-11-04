@@ -15,8 +15,8 @@ from pathlib import Path
 import numpy as np
 from astropy import units as u
 from astropy.constants import codata2022 as codata
+from scipy import fft
 from scipy.integrate import cumulative_trapezoid
-from scipy.ndimage import convolve1d
 from scipy.special import erf
 
 # internal imports
@@ -113,13 +113,17 @@ def apply_lsf(*, flux: np.ndarray, kernel: np.ndarray) -> np.ndarray:
 
     Convolves each spectrum with the LSF kernel, wrapping periodically in velocity.
 
-    Currently done with scipy.convolve1d, cost per spectrum = N_pix * kernel_length, might be deprecated in
-    future.
+    Performed via scipy's FFT for quicker treatment of longer kernels.
 
     """
-    if len(kernel) > flux.shape[-1]:
-        raise ValueError(f"LSF kernel ({len(kernel)} pixels) is wider than the spectrum ({flux.shape[-1]} pixels).")
-    return convolve1d(flux, kernel, axis=-1, mode="wrap")
+    n_bins = flux.shape[-1]
+    if len(kernel) > n_bins:
+        raise ValueError(f"LSF kernel ({len(kernel)} pixels) is wider than the spectrum ({n_bins} pixels).")
+    # zero pad kernel to spectrum length and roll such that its centre sits at 0 pixel
+    padded = np.zeros(n_bins)
+    padded[: len(kernel)] = kernel
+    padded = np.roll(padded, -(len(kernel) // 2))
+    return fft.irfft(fft.rfft(flux, axis=-1) * fft.rfft(padded), n=n_bins, axis=1)
 
 
 def load_tabulated_lsf(*, grating: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -199,10 +203,10 @@ def tabulated_lsf(*, grating: str, wavelength_obs: float, dv: float) -> np.ndarr
     return kernel / kernel.sum()
 
 
-def add_noise(*, flux: np.ndarray, snr: np.ndarray, seed: list[int]) -> np.ndarray:
+def add_noise(*, flux: np.ndarray, snr: float, seed: list[int]) -> np.ndarray:
     """
 
-    Adds Guassian noise of standard deviation sigma to each spectrum, i.e. rows of flux. Every row
+    Adds Gaussian noise of standard deviation sigma to each spectrum, i.e. rows of flux. Every row
     draws from its own generator, such that noise does not depend on how many others are computed and
     in what order.
 
