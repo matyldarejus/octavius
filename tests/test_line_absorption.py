@@ -21,7 +21,9 @@ from scipy.integrate import quad
 from scipy.special import wofz
 
 # internal imports
+from octavius.data_management import OctaviusConstants, load_internals
 from octavius.data_management.conventions import OctaviusConfig
+from octavius.data_management.snapshot_readers import build_reader
 from octavius.line_absorption import run_absorption
 from octavius.line_absorption.absorption_computations import (
     build_projected_kernel_table,
@@ -47,6 +49,9 @@ from octavius.line_absorption.absorption_helpers import (
     Sightlines,
     detect_gas_layout,
     plane_axes,
+)
+from octavius.line_absorption.absorption_output import (
+    write_absorption_spectra,
 )
 from octavius.line_absorption.ion_tables import (
     gamma_hi,
@@ -90,6 +95,7 @@ from octavius.run_octavius import analyse_snapshot
 from octavius.utils.generate_snapshots import generate_simba_snapshot
 
 CONFIG_PATH = Path(__file__).parent.parent / "octavius" / "config.yaml"
+INTERNALS_PATH = Path(__file__).parent.parent / "octavius" / "internals.yaml"
 STAGES = {
     "find_galaxies": True,
     "properties_core": True,
@@ -1204,3 +1210,40 @@ def test_n90_counts_particles_making_up_ninety_percent_of_the_column():
     los_offsets = np.array([0, 4, 5, 5, 7])
     member_column = np.array([0.5, 5.0, 1.5, 3.0, 2.0, 0.0, 0.0])
     np.testing.assert_array_equal(column_n90(los_offsets, member_column), [3, 1, -1, -1])
+
+
+# io tests
+
+
+def test_absorption_output_read(absorption_run, tmp_path):
+    _, config = absorption_run
+    for z in (0.0, 0.5, 1.0):
+        write_ion_table(tmp_path / f"lt{round(z * 1e4):05d}f100_i31", z)
+    config = replace(
+        config,
+        absorption_los_mode="RANDOM",
+        absorption_sample_path=None,
+        n_random_los=40,
+        absorption_lines=["OVI1031"],
+        ion_table_dir=tmp_path,
+        ion_table_pattern=TABLE_PATTERN,
+    )
+    results = run_absorption(config=config)
+    reader = build_reader(
+        snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
+    )
+    internals = load_internals(internals_filepath=INTERNALS_PATH, config=config)
+    path = tmp_path / "spectra.hdf5"
+    write_absorption_spectra(
+        path=path, results=results, config=config, internals=internals, sim_attrs=reader.simulation_attributes
+    )
+
+    ((sightlines, _, spectra),) = results
+    spectrum = spectra["OVI1031"]
+    with h5py.File(path, "r") as f:
+        np.testing.assert_array_equal(f["sightlines/galaxy_idx"][:], sightlines.galaxy_idx)
+        np.testing.assert_array_equal(f["OVI1031/n90"][:], spectrum.n90)
+        np.testing.assert_allclose(f["OVI1031/tau"][:], spectrum.tau, rtol=1e-6, atol=1e-30)  # float32
+        np.testing.assert_allclose(f["OVI1031/flux"][:], spectrum.flux, atol=1e-6)
+        assert f["metadata/config_parameters"].attrs["absorption_snr"] == config.absorption_snr
+        assert "redshift" in f["header"]
