@@ -15,7 +15,6 @@ from pathlib import Path
 import numpy as np
 from astropy import units as u
 from astropy.constants import codata2022 as codata
-from scipy import fft
 from scipy.integrate import cumulative_trapezoid
 from scipy.special import erf
 
@@ -123,7 +122,7 @@ def apply_lsf(*, flux: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     padded = np.zeros(n_bins)
     padded[: len(kernel)] = kernel
     padded = np.roll(padded, -(len(kernel) // 2))
-    return fft.irfft(fft.rfft(flux, axis=-1) * fft.rfft(padded), n=n_bins, axis=1)
+    return np.fft.irfft(np.fft.rfft(flux, axis=1) * np.fft.rfft(padded), n=n_bins, axis=-1)
 
 
 def load_tabulated_lsf(*, grating: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
