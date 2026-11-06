@@ -8,7 +8,7 @@ Line absorption execution pipeline.
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..data_management import OctaviusConfig
+    from ..data_management import OctaviusConfig, SnapshotReader
     from ..utils.loader import OctaviusCatalogue
 
 # default packages
@@ -72,7 +72,7 @@ WEIGHTED_QUANTITIES = ("temperature", "rho", "metallicity", "v_pec")  # tau-weig
 
 
 def run_absorption(
-    *, config: OctaviusConfig, catalogue_path: Path | None = None
+    *, config: OctaviusConfig, catalogue_path: Path | None = None, reader: "SnapshotReader | None" = None
 ) -> list[tuple[Sightlines, SightlineParticles, dict[str, SightlineSpectra]]]:
     """
 
@@ -85,6 +85,8 @@ def run_absorption(
         Config.
     catalogue_path: pathlib.Path, optional
         SAMPLE mode: Path to an Octavius catalogue.
+    reader: SnapshotReader
+        Reader, passed on from analyser, or rebuilt if absent.
 
     Returns
     -----------
@@ -93,8 +95,15 @@ def run_absorption(
         order), a single set in RANDOM mode.
 
     """
+    if reader is None:
+        reader = build_reader(
+            snapshot_path=config.snapshot_path,
+            constants=OctaviusConstants(mu=config.MU, frad=config.FRAD),
+            config=config,
+        )
+
     if config.absorption_los_mode == "RANDOM":
-        boxsize, scale_factor, hubble = _read_box_from_snapshot(config=config)
+        boxsize, scale_factor, hubble = _read_box_from_snapshot(reader=reader)
         sightline_sets = [
             build_random_sightlines(
                 n_los=config.n_random_los,
@@ -108,7 +117,7 @@ def run_absorption(
     elif config.absorption_los_mode == "EXPLICIT":
         if config.absorption_los_path is None:
             raise ValueError("absorption_los_path is not set in the line_absorption config section.")
-        boxsize, scale_factor, hubble = _read_box_from_snapshot(config=config)
+        boxsize, scale_factor, hubble = _read_box_from_snapshot(reader=reader)
         pos, los_axis = read_los_file(
             path=config.absorption_los_path, default_los_axis=LOS_AXIS_IDX[config.absorption_los_axis]
         )
@@ -133,7 +142,7 @@ def run_absorption(
 
     # preselect particles
     start = time.perf_counter()
-    sightline_particles = _preselect_gas(config=config, sightline_sets=sightline_sets)
+    sightline_particles = _preselect_gas(config=config, sightline_sets=sightline_sets, reader=reader)
     logger.info(f"Gas preselection took {time.perf_counter() - start:.1f} s.")
     for sightlines, particles in zip(sightline_sets, sightline_particles):
         logger.info(
@@ -143,7 +152,9 @@ def run_absorption(
 
     # synthesise spectra
     start = time.perf_counter()
-    spectra = _synthesise_spectra(config=config, sightline_sets=sightline_sets, sightline_particles=sightline_particles)
+    spectra = _synthesise_spectra(
+        config=config, sightline_sets=sightline_sets, sightline_particles=sightline_particles, reader=reader
+    )
     logger.info(f"Spectrum synthesis took {time.perf_counter() - start:.1f} s.")
 
     return list(zip(sightline_sets, sightline_particles, spectra))
@@ -333,15 +344,12 @@ def _read_galaxy_geometry(*, catalogue: OctaviusCatalogue, galaxy_idx: np.ndarra
     }
 
 
-def _read_box_from_snapshot(*, config: OctaviusConfig) -> tuple[float, float, float]:
+def _read_box_from_snapshot(*, reader: "SnapshotReader") -> tuple[float, float, float]:
     """
 
     Reads the box size, the scale factor, and Hubble constant from the snapshot header.
 
     """
-    reader = build_reader(
-        snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
-    )
     sim = reader.simulation_attributes
     hubble = (sim.Hz / u.s).to(u.km / u.s / u.kpc).value
     return float(sim.boxsize), float(sim.scale_factor), float(hubble)
@@ -362,7 +370,9 @@ def _read_los_axes(*, f: h5py.File, n_entries: int, default_los_axis: int) -> np
     return np.array([LOS_AXIS_IDX[name] for name in names], dtype=np.int64)
 
 
-def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) -> list[SightlineParticles]:
+def _preselect_gas(
+    *, config: OctaviusConfig, sightline_sets: list[Sightlines], reader: "SnapshotReader"
+) -> list[SightlineParticles]:
     """
 
     Streams pos and smoothing_length for ALL gas in contiguous chunks through the reader's serial subset path.
@@ -374,9 +384,6 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
     """
     sim_type = config.simulation_type
 
-    reader = build_reader(
-        snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
-    )
     n_gas = reader.particle_counts["gas"]
     gas_group = reader.inverse_ptype_map["gas"]
     grids = [
@@ -387,6 +394,7 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
     los_chunks: list[list[np.ndarray]] = [[] for _ in sightline_sets]
 
     # read in the data
+    # TODO: potentially add kernel gamma and wind field to be stored in reader to avoid file read in
     with h5py.File(config.snapshot_path, "r") as snapshot:
         layout = _gas_layout(snapshot=snapshot, sim_type=sim_type, gas_group=gas_group)
         support_factor = _kernel_support_factor(snapshot=snapshot, layout=layout)
@@ -430,7 +438,11 @@ def _preselect_gas(*, config: OctaviusConfig, sightline_sets: list[Sightlines]) 
 
 
 def _read_gas_properties(
-    *, config: OctaviusConfig, particle_idx: np.ndarray, layout: GasLayout
+    *,
+    config: OctaviusConfig,
+    particle_idx: np.ndarray,
+    layout: GasLayout,
+    reader: "SnapshotReader",
 ) -> dict[str, np.ndarray]:
     """
 
@@ -439,11 +451,9 @@ def _read_gas_properties(
     These are all properties as listed in GAS_PROPERTIES.
 
     """
-    reader = build_reader(
-        snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
-    )
     gas = reader.read_requested_columns(ptype="gas", datasets=GAS_PROPERTIES, sorted_snapshot_indices=particle_idx)
 
+    # TODO: potentially add element fractions to be provided by reader
     with h5py.File(config.snapshot_path, "r") as snapshot:
         metals = snapshot[reader.inverse_ptype_map["gas"]][layout.metals_dataset]
         gas["metals"] = np.empty((len(particle_idx), metals.shape[1]), dtype=np.float64)
@@ -459,7 +469,11 @@ def _read_gas_properties(
 
 
 def _synthesise_spectra(
-    *, config: OctaviusConfig, sightline_sets: list[Sightlines], sightline_particles: list[SightlineParticles]
+    *,
+    config: OctaviusConfig,
+    sightline_sets: list[Sightlines],
+    sightline_particles: list[SightlineParticles],
+    reader: "SnapshotReader",
 ) -> list[dict[str, SightlineSpectra]]:
     """
 
@@ -478,10 +492,6 @@ def _synthesise_spectra(
     unknown = [name for name in config.absorption_lines if name not in lines]
     if unknown:
         raise ValueError(f"Unknown absorption_lines {unknown}; names must match line_absorption/line_data.csv.")
-
-    reader = build_reader(
-        snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
-    )
     sim = reader.simulation_attributes
     redshift, scale_factor = float(sim.redshift), float(sim.scale_factor)
     hubble = (sim.Hz / u.s).to(u.km / u.s / u.kpc).value  # km/s/kpc
@@ -510,7 +520,7 @@ def _synthesise_spectra(
 
     # get their properties
     start = time.perf_counter()
-    gas = _read_gas_properties(config=config, particle_idx=kept, layout=layout)
+    gas = _read_gas_properties(config=config, particle_idx=kept, layout=layout, reader=reader)
     logger.info(f"Read properties of {len(kept):,} kept gas particles in {time.perf_counter() - start:.1f} s.")
     gas["support"] = gas["smoothing_length"] * support_factor
     metals = gas["metals"]

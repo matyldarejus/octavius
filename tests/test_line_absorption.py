@@ -595,7 +595,10 @@ def test_second_gas_read_matches_snapshot(absorption_run):
         idx = np.unique(np.r_[0, 1, 2, 3, 40, 45, n_gas // 2, n_gas - 1])  # contiguous run + gaps
         raw_metals, raw_hsml = gas["Metallicity"][idx], gas["SmoothingLength"][idx]
 
-    props = _read_gas_properties(config=config, particle_idx=idx, layout=GAS_LAYOUTS["SIMBA"])
+    reader = build_reader(
+        snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
+    )
+    props = _read_gas_properties(config=config, particle_idx=idx, layout=GAS_LAYOUTS["SIMBA"], reader=reader)
 
     assert set(props) == {"pos", "vel", "smoothing_length", "rho", "mass", "temperature", "metals"}
     assert all(len(values) == len(idx) for values in props.values())
