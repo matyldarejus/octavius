@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from ..utils.loader import OctaviusCatalogue
 
 # default packages
+import time
 from pathlib import Path
 
 # other packages
@@ -130,14 +131,20 @@ def run_absorption(
     n_los = sum(s.n_los for s in sightline_sets)
     logger.info(f"Placed {n_los} sightlines ({config.absorption_los_mode} mode) along {len(sightline_sets)} axes.")
 
+    # preselect particles
+    start = time.perf_counter()
     sightline_particles = _preselect_gas(config=config, sightline_sets=sightline_sets)
+    logger.info(f"Gas preselection took {time.perf_counter() - start:.1f} s.")
     for sightlines, particles in zip(sightline_sets, sightline_particles):
         logger.info(
             f"Axis {'XYZ'[sightlines.los_axis]}: {particles.n_kept:,} gas particles kept "
             f"({len(particles.los_members):,} particle-sightline pairs) for {sightlines.n_los} sightlines."
         )
 
+    # synthesise spectra
+    start = time.perf_counter()
     spectra = _synthesise_spectra(config=config, sightline_sets=sightline_sets, sightline_particles=sightline_particles)
+    logger.info(f"Spectrum synthesis took {time.perf_counter() - start:.1f} s.")
 
     return list(zip(sightline_sets, sightline_particles, spectra))
 
@@ -502,7 +509,9 @@ def _synthesise_spectra(
     kept = np.unique(np.concatenate([p.particle_idx for p in sightline_particles]))
 
     # get their properties
+    start = time.perf_counter()
     gas = _read_gas_properties(config=config, particle_idx=kept, layout=layout)
+    logger.info(f"Read properties of {len(kept):,} kept gas particles in {time.perf_counter() - start:.1f} s.")
     gas["support"] = gas["smoothing_length"] * support_factor
     metals = gas["metals"]
     if layout.stores_hydrogen:
