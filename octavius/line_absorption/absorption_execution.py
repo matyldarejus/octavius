@@ -72,7 +72,12 @@ WEIGHTED_QUANTITIES = ("temperature", "rho", "metallicity", "v_pec")  # tau-weig
 
 
 def run_absorption(
-    *, config: OctaviusConfig, catalogue_path: Path | None = None, reader: "SnapshotReader | None" = None
+    *,
+    config: OctaviusConfig,
+    catalogue_path: Path | None = None,
+    reader: "SnapshotReader | None" = None,
+    catalogue: "OctaviusCatalogue | None" = None,
+    entries: SampleEntries | None = None,
 ) -> list[tuple[Sightlines, SightlineParticles, dict[str, SightlineSpectra]]]:
     """
 
@@ -85,8 +90,12 @@ def run_absorption(
         Config.
     catalogue_path: pathlib.Path, optional
         SAMPLE mode: Path to an Octavius catalogue.
-    reader: SnapshotReader
-        Reader, passed on from analyser, or rebuilt if absent.
+    reader: SnapshotReader, optional
+        Reader, passed on from the analyser, or rebuilt if absent.
+    catalogue: OctaviusCatalogue, optional
+        SAMPLE mode: The galaxy sample, passed on from the analyser, or opened from catalogue_path.
+    entries: SampleEntries, optional
+        SAMPLE mode: The galaxy sample, passed on from the analyser, or read from absorption_sample_path.
 
     Returns
     -----------
@@ -134,8 +143,15 @@ def run_absorption(
                     hubble=hubble,
                 )
             )
+    elif catalogue is not None:
+        sightline_sets = _sample_sightlines(config=config, catalogue=catalogue, entries=entries)
     else:
-        sightline_sets = _sample_sightlines(config=config, catalogue_path=catalogue_path)
+        if catalogue_path is None:
+            catalogue_path = output_catalogue_path(snapshot_path=config.snapshot_path, output_dir=config.output_dir)
+        if not catalogue_path.exists():
+            raise FileNotFoundError(f"No Octavius catalogue at {catalogue_path}; run analyse_snapshot first.")
+        with load_catalogue(catalogue_path=catalogue_path) as catalogue:
+            sightline_sets = _sample_sightlines(config=config, catalogue=catalogue, entries=entries)
 
     n_los = sum(s.n_los for s in sightline_sets)
     logger.info(f"Placed {n_los} sightlines ({config.absorption_los_mode} mode) along {len(sightline_sets)} axes.")
@@ -161,34 +177,27 @@ def run_absorption(
 
 
 def _sample_sightlines(
-    *, config: OctaviusConfig, catalogue_path: Path | None = None
-) -> list[tuple[Sightlines, SightlineParticles]]:
+    *, config: OctaviusConfig, catalogue: "OctaviusCatalogue", entries: SampleEntries | None = None
+) -> list[Sightlines]:
     """
 
     Sample sightlines based on parameters and galaxy indices provided by the user.
 
     """
-
-    if config.absorption_sample_path is None:
-        raise ValueError("absorption_sample_path is not set in the line_absorption config section.")
-
-    if catalogue_path is None:
-        catalogue_path = output_catalogue_path(snapshot_path=config.snapshot_path, output_dir=config.output_dir)
-    if not catalogue_path.exists():
-        raise FileNotFoundError(f"No Octavius catalogue at {catalogue_path}; run analyse_snapshot first.")
-
-    params = prepare_sightline_params(config=config)
-
-    with load_catalogue(catalogue_path=catalogue_path) as catalogue:
+    if entries is None:
+        if config.absorption_sample_path is None:
+            raise ValueError("absorption_sample_path is not set in the line_absorption config section.")
         entries = read_sample_file(
             path=config.absorption_sample_path,
             n_galaxies=len(catalogue.galaxies),
             default_los_axis=LOS_AXIS_IDX[config.absorption_los_axis],
         )
-        geometry = _read_galaxy_geometry(catalogue=catalogue, galaxy_idx=entries.galaxy_idx)
-        boxsize = catalogue.boxsize_comoving
-        scale_factor = float(catalogue.sim_info("scale_factor"))
-        hubble = (float(catalogue.sim_info("Hz")) / u.s).to(u.km / u.s / u.kpc).value  # km/s/kpc
+
+    params = prepare_sightline_params(config=config)
+    geometry = _read_galaxy_geometry(catalogue=catalogue, galaxy_idx=entries.galaxy_idx)
+    boxsize = catalogue.boxsize_comoving
+    scale_factor = float(catalogue.sim_info("scale_factor"))
+    hubble = (float(catalogue.sim_info("Hz")) / u.s).to(u.km / u.s / u.kpc).value
 
     if params.impact_in_r200c:
         require_finite_r200c(r200c=geometry["r200c"], galaxy_idx=entries.galaxy_idx)
