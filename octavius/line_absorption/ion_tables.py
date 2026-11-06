@@ -133,6 +133,9 @@ def _table_redshifts(*, table_dir: Path, pattern: str) -> dict[float, Path]:
     tables = {}
     for path in sorted(table_dir.iterdir()):
         if name.fullmatch(path.name):
+            if path.stat().st_size == 0:
+                logger.warning(f"Skipping empty ion table {path.name}.")
+                continue
             with path.open() as f:
                 redshift, _ = _parse_header(f.readline())
             tables[redshift] = path
