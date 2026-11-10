@@ -23,7 +23,11 @@ from scipy.special import wofz
 # internal imports
 from octavius.data_management import OctaviusConstants, load_internals
 from octavius.data_management.conventions import OctaviusConfig
-from octavius.data_management.snapshot_readers import build_reader
+from octavius.data_management.snapshot_readers import (
+    build_reader,
+    SimbaReader,
+    SimbaCReader,
+)
 from octavius.line_absorption import run_absorption
 from octavius.line_absorption.absorption_computations import (
     build_projected_kernel_table,
@@ -34,6 +38,7 @@ from octavius.line_absorption.absorption_computations import (
     velocity_grid,
 )
 from octavius.line_absorption.absorption_execution import (
+    GAS_PROPERTIES,
     _kernel_support_factor,
     _read_gas_properties,
     prepare_sightline_params,
@@ -605,11 +610,13 @@ def test_second_gas_read_matches_snapshot(absorption_run):
     reader = build_reader(
         snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
     )
-    props = _read_gas_properties(config=config, particle_idx=idx, layout=GAS_LAYOUTS["SIMBA"], reader=reader)
+    props = _read_gas_properties(particle_idx=idx, elements=["He", "O"], reader=reader)
 
-    assert set(props) == {"pos", "vel", "smoothing_length", "rho", "mass", "temperature", "metals"}
+    assert set(props) == {*GAS_PROPERTIES, "metallicity", "fraction_He", "fraction_O"}
     assert all(len(values) == len(idx) for values in props.values())
-    np.testing.assert_array_equal(props["metals"], raw_metals)
+    np.testing.assert_array_equal(props["metallicity"], raw_metals[:, 0])
+    np.testing.assert_array_equal(props["fraction_He"], raw_metals[:, 1])
+    np.testing.assert_array_equal(props["fraction_O"], raw_metals[:, 4])
     np.testing.assert_allclose(props["smoothing_length"], raw_hsml / h, rtol=1e-6)  # kpc a / h -> kpc a
     assert np.all(props["temperature"] > 0.0) and np.all(props["rho"] > 0.0)
 
@@ -1140,20 +1147,27 @@ def test_self_shielding_limits_and_characteristic_density(uvb, gamma_0, sigma_0)
 # gas layouts
 
 
-def test_unknown_layouts_and_untracked_elements_raise():
+def test_unknown_layouts_raise():
     with pytest.raises(NotImplementedError, match="TNG"):
         detect_gas_layout(simulation_type="TNG", n_metal_columns=None)
-    with pytest.raises(KeyError, match="Al"):
-        GAS_LAYOUTS["SIMBA"].column("Al")
 
 
-@pytest.mark.parametrize("name", ["SIMBA", "SIMBA-C"])
-def test_every_line_element_is_available(name):
-    layout = GAS_LAYOUTS[name]
+def test_untracked_elements_raise(absorption_run):
+    _, config = absorption_run
+    reader = build_reader(
+        snapshot_path=config.snapshot_path, constants=OctaviusConstants(mu=config.MU, frad=config.FRAD), config=config
+    )
+    with pytest.raises(KeyError, match="Al is not among the elements"):
+        _read_gas_properties(particle_idx=np.array([0, 1]), elements=["Al"], reader=reader)
+
+
+@pytest.mark.parametrize("reader_class", [SimbaReader, SimbaCReader])
+def test_every_line_element_is_readable(reader_class):
+    tracked = {symbol for symbol in reader_class.element_columns if symbol is not None}
     for element in {t.element for t in load_line_table().values()}:
-        if element == "H" and not layout.stores_hydrogen:
+        if element == "H" and "H" not in tracked:
             continue  # Simba: X_H = 1 - Y - Z, no column needed
-        layout.column(element)  # KeyError if a line's element is missing
+        assert element in tracked, f"{reader_class.__name__} does not track {element}"
 
 
 # spectrum processing

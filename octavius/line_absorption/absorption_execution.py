@@ -23,7 +23,7 @@ from astropy import units as u
 
 # internal imports
 from ..data_management import OctaviusConstants, build_reader, output_catalogue_path
-from ..data_management.parallel_reading import generate_read_plan
+from ..data_management.conventions import element_fraction_name
 from ..log import get_logger
 from ..utils import load_catalogue
 from .absorption_computations import (
@@ -455,9 +455,8 @@ def _preselect_gas(
 
 def _read_gas_properties(
     *,
-    config: OctaviusConfig,
     particle_idx: np.ndarray,
-    layout: GasLayout,
+    elements: list[str],
     reader: "SnapshotReader",
 ) -> dict[str, np.ndarray]:
     """
@@ -467,21 +466,8 @@ def _read_gas_properties(
     These are all properties as listed in GAS_PROPERTIES.
 
     """
-    gas = reader.read_requested_columns(ptype="gas", datasets=GAS_PROPERTIES, sorted_snapshot_indices=particle_idx)
-
-    # TODO: potentially add element fractions to be provided by reader
-    with h5py.File(config.snapshot_path, "r") as snapshot:
-        metals = snapshot[reader.inverse_ptype_map["gas"]][layout.metals_dataset]
-        gas["metals"] = np.empty((len(particle_idx), metals.shape[1]), dtype=np.float64)
-        position = 0
-        for read_slice, mask in generate_read_plan(idx_sorted=particle_idx):  # contiguous reads
-            chunk = metals[read_slice]
-            if mask is not None:
-                chunk = chunk[mask]
-            gas["metals"][position : position + len(chunk)] = chunk
-            position += len(chunk)
-
-    return gas
+    datasets = GAS_PROPERTIES + ["metallicity"] + [element_fraction_name(element) for element in elements]
+    return reader.read_requested_columns(ptype="gas", datasets=datasets, sorted_snapshot_indices=particle_idx)
 
 
 def _synthesise_spectra(
@@ -534,16 +520,23 @@ def _synthesise_spectra(
     # get all kept particle indices to read snapshot only once
     kept = np.unique(np.concatenate([p.particle_idx for p in sightline_particles]))
 
+    # check if hydrogen stored in columns and otherwise calculate using XH = 1 - Y - Z
+    stores_hydrogen = "H" in reader.available_elements
+    elements = {lines[name].element for name in config.absorption_lines} - {"H"}
+    if stores_hydrogen:
+        elements.add("H")
+    else:
+        elements.add("He")
+
     # get their properties
     start = time.perf_counter()
-    gas = _read_gas_properties(config=config, particle_idx=kept, layout=layout, reader=reader)
+    gas = _read_gas_properties(particle_idx=kept, elements=sorted(elements), reader=reader)
     logger.info(f"Read properties of {len(kept):,} kept gas particles in {time.perf_counter() - start:.1f} s.")
     gas["support"] = gas["smoothing_length"] * support_factor
-    metals = gas["metals"]
-    if layout.stores_hydrogen:
-        hydrogen_fraction = metals[:, layout.column("H")]
+    if stores_hydrogen:
+        hydrogen_fraction = gas["fraction_H"]
     else:
-        hydrogen_fraction = 1.0 - metals[:, layout.column("He")] - metals[:, layout.column("Z")]
+        hydrogen_fraction = 1.0 - gas["fraction_He"] - gas["metallicity"]
     n_H = hydrogen_number_density(density=gas["rho"], hydrogen_fraction=hydrogen_fraction)
     baryon_fraction = layout.baryon_fraction if layout.baryon_fraction is not None else DEFAULT_BARYON_FRACTION
 
@@ -556,7 +549,7 @@ def _synthesise_spectra(
         transition = lines[name]
         constants = line_constants(transition=transition)
         element_fraction = (
-            hydrogen_fraction if transition.element == "H" else metals[:, layout.column(transition.element)]
+            hydrogen_fraction if transition.element == "H" else gas[element_fraction_name(transition.element)]
         )
         fraction = ion_fraction(
             table=ion_table,
@@ -629,7 +622,7 @@ def _sightline_set_spectrum(
         x_los=pos[:, los_axis], v_pec_los=v_pec, scale_factor=scale_factor, hubble=hubble, vbox=sightlines.vbox
     )
     # average over each pixel
-    weights = np.column_stack([gas["temperature"][rows], gas["rho"][rows], gas["metals"][rows, 0], v_pec])
+    weights = np.column_stack([gas["temperature"][rows], gas["rho"][rows], gas["metallicity"][rows], v_pec])
     n_bins, dv = velocity_grid(vbox=sightlines.vbox, pixel_kms=config.absorption_pixel_kms)  # pixel grid
 
     tau, weighted, member_column = optical_depth(
