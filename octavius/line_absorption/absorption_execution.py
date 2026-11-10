@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from ..utils.loader import OctaviusCatalogue
 
 # default packages
+import csv
 import time
 from pathlib import Path
 
@@ -282,36 +283,41 @@ def read_los_file(*, path: Path, default_los_axis: int) -> tuple[np.ndarray, np.
 
     Reads and validates user-provide sightline position file for explicit sampling mode.
 
-    Currently, this is an h5py file as the expectation is that these positions will be chosen
-    around specific objects, such that the file will be created in a script.
-
-    This should hold 'pos' (ckpc, (n, 3)) and optional per-row 'los_axis' (X, Y, or Z).
+    This is a CSV file with a header row naming the columns (x, y, z) and the fourth one (optionally)
+    the los_axis (X, Y, Z) per row.
 
     """
-    with h5py.File(path, "r") as f:
-        if "pos" not in f:
-            raise KeyError(f"Sightline file {path} has no 'pos' dataset.")
-        pos = np.asarray(f["pos"][:], dtype=np.float64)
+    with path.open(newline="") as f:
+        lines = [line for line in f if line.strip() and not line.lstrip().startswith("#")]
+    if not lines:
+        raise ValueError(f"Sightline file {path} is empty.")
 
-        if "los_axis" in f:
-            names = [name.upper() for name in f["los_axis"].asstr()[:]]
-            unknown = sorted(set(names) - set(LOS_AXIS_IDX))
-            if unknown:
-                raise ValueError(f"Sightline file los_axis has invalid entries {unknown}; use X, Y, or Z.")
-            los_axis = np.array([LOS_AXIS_IDX[name] for name in names], dtype=np.int64)
-        else:
-            los_axis = np.full(len(pos), default_los_axis, dtype=np.int64)
+    header, *rows = csv.reader(lines, skipinitialspace=True)
+    columns = [name.strip().lower() for name in header]
+    missing = [name for name in ("x", "y", "z") if name not in columns]
+    if missing:
+        raise ValueError(f"Sightline file {path} header must name x, y, z (missing: {', '.join(missing)}).")
+    if any(len(row) != len(columns) for row in rows):
+        raise ValueError("Every sightline file row must have one entry per header column.")
+    table = {name: [row[i].strip() for row in rows] for i, name in enumerate(columns)}
+
+    pos = np.array([table["x"], table["y"], table["z"]], dtype=np.float64).T
+    if "los_axis" in table:
+        names = [name.upper() for name in table["los_axis"]]
+        unknown = sorted(set(names) - set(LOS_AXIS_IDX))
+        if unknown:
+            raise ValueError(f"Sightline file los_axis has invalid entries {unknown}; use X, Y, or Z.")
+        los_axis = np.array([LOS_AXIS_IDX[name] for name in names], dtype=np.int64)
+    else:
+        los_axis = np.full(len(pos), default_los_axis, dtype=np.int64)
 
     # guards for:
-    # wrong shape or empty
-    if pos.ndim != 2 or pos.shape[1] != 3 or len(pos) == 0:
-        raise ValueError(f"Sightline file pos must have shape (n, 3) with n > 0, got {pos.shape}.")
+    # no rows
+    if len(pos) == 0:
+        raise ValueError(f"Sightline file {path} has a header but no positions.")
     # non-finite positions
     if not np.all(np.isfinite(pos)):
-        raise ValueError("Sightline file pos contains non-finite values.")
-    # mismatched length datasets
-    if len(los_axis) != len(pos):
-        raise ValueError("Sightline file los_axis must have the same length as pos.")
+        raise ValueError("Sightline file positions contain non-finite values.")
 
     return pos, los_axis
 

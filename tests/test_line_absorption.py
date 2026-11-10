@@ -209,10 +209,13 @@ def test_require_finite_r200c():
 
 
 def write_los_file(path, *, pos, los_axis=None):
-    with h5py.File(path, "w") as f:
-        f.create_dataset("pos", data=np.asarray(pos, dtype=np.float64))
-        if los_axis is not None:
-            f.create_dataset("los_axis", data=np.array(los_axis, dtype="S1"))
+    lines = ["# test sightlines", "x, y, z" + (", los_axis" if los_axis is not None else "")]
+    for i, row in enumerate(np.asarray(pos, dtype=np.float64)):
+        entries = [str(value) for value in row]
+        if los_axis is not None and i < len(los_axis):
+            entries.append(los_axis[i])
+        lines.append(", ".join(entries))
+    path.write_text("\n".join(lines) + "\n")
     return path
 
 
@@ -227,7 +230,7 @@ def write_los_file(path, *, pos, los_axis=None):
     ],
 )
 def test_los_file_rejects_bad_input(tmp_path, kwargs):
-    path = write_los_file(tmp_path / "los.hdf5", **kwargs)
+    path = write_los_file(tmp_path / "los.csv", **kwargs)
     with pytest.raises(ValueError):
         read_los_file(path=path, default_los_axis=2)
 
@@ -365,7 +368,7 @@ def test_explicit_sightlines_wrap_into_the_box():
 def test_run_absorption_explicit_mode(absorption_run, tmp_path):
     _, config = absorption_run
     path = write_los_file(
-        tmp_path / "los.hdf5", pos=[[10.0, 20.0, 30.0], [5.0, 6.0, 7.0], [40.0, 50.0, 60.0]], los_axis=["Z", "X", "Z"]
+        tmp_path / "los.csv", pos=[[10.0, 20.0, 30.0], [5.0, 6.0, 7.0], [40.0, 50.0, 60.0]], los_axis=["Z", "X", "Z"]
     )
     results = run_absorption(config=replace(config, absorption_los_mode="EXPLICIT", absorption_los_path=path))
 
