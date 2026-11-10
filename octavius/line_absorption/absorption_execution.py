@@ -49,6 +49,7 @@ from .spectrum_processing import (
     C_KMS,
     add_noise,
     apply_lsf,
+    equivalent_width,
     lsf_kernel,
 )
 from .ion_tables import DEFAULT_BARYON_FRACTION, hydrogen_number_density, ion_counts, ion_fraction, load_ion_table
@@ -656,14 +657,25 @@ def _sightline_set_spectrum(
     flux = apply_lsf(flux=np.exp(-tau), kernel=kernel)
     if config.absorption_snr is not None:
         flux = add_noise(flux=flux, snr=config.absorption_snr, seed=seed)
+
+    velocity = (np.arange(n_bins) + 0.5) * dv
+    window = {
+        "velocity": velocity,
+        "gal_velocity": sightlines.gal_velocity_pos,
+        "vbox": sightlines.vbox,
+        "half_width": config.absorption_ew_window,
+        "wavelength_rest": transition.wavelength,
+    }
     return SightlineSpectra(
         line=transition.name,
-        velocity=(np.arange(n_bins) + 0.5) * dv,
+        velocity=velocity,
         tau=tau,
         flux=flux,
         weighted={quantity: weighted[:, w] for w, quantity in enumerate(WEIGHTED_QUANTITIES)},
         member_column=member_column,
         n90=column_n90(particles.los_offsets, member_column),
+        ew=equivalent_width(absorbed=1.0 - flux, **window),
+        ew_intrinsic=equivalent_width(absorbed=1.0 - np.exp(-tau), **window),
     )
 
 

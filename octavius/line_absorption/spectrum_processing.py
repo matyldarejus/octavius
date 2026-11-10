@@ -215,3 +215,32 @@ def add_noise(*, flux: np.ndarray, snr: float, seed: list[int]) -> np.ndarray:
         rng = np.random.default_rng([*seed, los])
         noisy[los] = flux[los] + rng.standard_normal(flux.shape[1]) / snr
     return noisy
+
+
+def equivalent_width(
+    *,
+    absorbed: np.ndarray,
+    velocity: np.ndarray,
+    gal_velocity: np.ndarray,
+    vbox: float,
+    half_width: float | None,
+    wavelength_rest: float,
+) -> np.ndarray:
+    """
+
+    Rest-frame equivalent width in Angstrom,
+
+    W = (lambda_rest / c) * sum(1 - F) dv,
+
+    for each sightline, where 1 - F = absorbed (flux). Within +/- half-width of the galaxy velocity
+    (periodic, NaN without a galaxy), or over the whole sightline if half_width is None.
+
+    """
+    dv = velocity[1] - velocity[0]
+    if half_width is None:  # whole sightline
+        return wavelength_rest / C_KMS * absorbed.sum(axis=-1) * dv
+
+    offset = (velocity[None, :] - gal_velocity[:, None] + 0.5 * vbox) % vbox - 0.5 * vbox  # nearest image
+    in_window = np.abs(offset) < half_width
+    ew = wavelength_rest / C_KMS * np.sum(absorbed * in_window, axis=-1) * dv
+    return np.where(np.isfinite(gal_velocity), ew, np.nan)

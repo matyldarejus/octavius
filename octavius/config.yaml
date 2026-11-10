@@ -98,6 +98,7 @@ line_absorption:
   absorption_lsf:             GAUSSIAN              # none, gaussian, or tabulated (e.g. cos_g130m)
   absorption_resolving_power: 40000                 # for gaussian lsf; HWO baseline (Dressing et al. (2026))
   absorption_snr:             30
+  absorption_ew_window:       600                   
 
 parallelism:
   n_io_chunks:        10    # for IO reads on datasets, not chunking the pipeline

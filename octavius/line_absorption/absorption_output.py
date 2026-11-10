@@ -104,6 +104,9 @@ def write_absorption_spectra(
             tau = group.create_dataset("tau", shape=shape, dtype=SPECTRUM_DTYPE, compression=1)
             flux = group.create_dataset("flux", shape=shape, dtype=SPECTRUM_DTYPE, compression=1)
             n90 = group.create_dataset("n90", shape=(n_total,), dtype=np.int64, compression=1)
+            ew = {name: group.create_dataset(name, shape=(n_total,), dtype=np.int64) for name in {"ew", "ew_intrinsic"}}
+            for ds in ew.values():
+                ds.attrs["unit"] = "Angstrom"
             weighted = {
                 quantity: group.create_dataset(f"weighted/{quantity}", shape=shape, dtype=SPECTRUM_DTYPE, compression=1)
                 for quantity in WEIGHTED_UNITS
@@ -117,6 +120,8 @@ def write_absorption_spectra(
                 tau[rows] = spectrum.tau
                 flux[rows] = spectrum.flux
                 n90[rows] = spectrum.n90
+                for name, ds in ew.items():
+                    ds[rows] = getattr(spectrum, name)
                 for quantity, ds in weighted.items():
                     ds[rows] = spectrum.weighted[quantity]
 

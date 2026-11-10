@@ -188,6 +188,8 @@ class SightlineSpectra:
     weighted: dict[str, np.ndarray]  # quantity to tau-weighted mean (0 where tau = 0)
     member_column: np.ndarray
     n90: np.ndarray  # (n_los,) particles making up 90% of the column
+    ew: np.ndarray  # (n_los,) rest-frame EW from flux (LSF + noise), in Angstrom
+    ew_intrinsic: np.ndarray  # (n_los,) rest-frame EW from exp(-tau), in Angstrom
 
     @property
     def n_los(self) -> int:

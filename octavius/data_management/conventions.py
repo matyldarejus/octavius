@@ -251,6 +251,7 @@ class OctaviusConfig:
     absorption_lsf: str = "GAUSSIAN"
     absorption_resolving_power: float = 40000.0
     absorption_snr: float | None = 30.0
+    absorption_ew_window: float | None = 600.0
 
     terminal_output_level: str = "INFO"
     keep_logs: bool = False
@@ -337,6 +338,9 @@ class OctaviusConfig:
 
         if self.absorption_snr is not None and self.absorption_snr <= 0:
             raise ValueError("'absorption_snr' must be positive, or blank for no noise.")
+
+        if self.absorption_ew_window is not None and self.absorption_ew_window <= 0:
+            raise ValueError("'absorption_ew_window' must be positive, or blank for the whole sightline.")
 
     @classmethod
     def from_yaml(cls, config_path: Path | str, **overrides: Any) -> OctaviusConfig:

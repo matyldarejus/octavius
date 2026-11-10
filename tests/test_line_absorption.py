@@ -44,6 +44,7 @@ from octavius.line_absorption.absorption_execution import (
 from octavius.line_absorption.absorption_helpers import (
     GAS_LAYOUTS,
     KERNEL_IDX,
+    LOS_AXIS_IDX,
     SightlineParams,
     SightlineParticles,
     Sightlines,
@@ -87,12 +88,15 @@ from octavius.line_absorption.spectrum_processing import (
     LEGACY_LSFS,
     add_noise,
     apply_lsf,
+    equivalent_width,
     gaussian_lsf,
     load_tabulated_lsf,
     tabulated_lsf,
 )
 from octavius.run_octavius import analyse_snapshot
 from octavius.utils.generate_snapshots import generate_simba_snapshot
+from octavius.utils import load_catalogue
+from octavius.utils import build_analyser
 
 CONFIG_PATH = Path(__file__).parent.parent / "octavius" / "config.yaml"
 INTERNALS_PATH = Path(__file__).parent.parent / "octavius" / "internals.yaml"
@@ -653,6 +657,62 @@ def test_unknown_absorption_line_raises(absorption_run):
     )
     with pytest.raises(ValueError, match="OVI1067"):
         run_absorption(config=config)
+
+
+def test_analyser_places_sightlines_around_requested_galaxies(absorption_run):
+    catalogue_path, config = absorption_run
+    config = replace(config, impact_units="KPC")  # the junk test haloes may lack a usable r200c
+
+    with load_catalogue(catalogue_path=catalogue_path) as catalogue:
+        n_galaxies = len(catalogue.galaxies)
+        analyser = build_analyser(catalogue=catalogue, config=config)
+        ((sightlines, particles, spectra),) = analyser.compute_absorption(group_indices=[n_galaxies - 1, 0, 0])
+
+    assert sightlines.los_axis == LOS_AXIS_IDX[config.absorption_los_axis]
+    assert set(sightlines.galaxy_idx.tolist()) == {0, n_galaxies - 1}  # the repeated 0 gives no extra sightlines
+    assert len(particles.los_offsets) == sightlines.n_los + 1
+    assert spectra == {}
+
+
+def test_analyser_follows_the_config_mode_without_galaxies(absorption_run):
+    catalogue_path, config = absorption_run
+    config = replace(config, absorption_los_mode="RANDOM", absorption_sample_path=None, n_random_los=5)
+
+    with load_catalogue(catalogue_path=catalogue_path) as catalogue:
+        analyser = build_analyser(catalogue=catalogue, config=config)
+        ((sightlines, _, _),) = analyser.compute_absorption()
+
+    assert sightlines.n_los == 5
+    assert np.all(sightlines.galaxy_idx == -1)  # random sightlines belong to no galaxy
+
+
+def test_equivalent_width_counts_absorption_inside_window_only():
+    velocity = (np.arange(100) + 0.5) * 10.0  # vbox = 1000 km/s, 10 km/s pixels
+    absorbed = np.zeros((3, 100))
+    absorbed[:, [2, 98, 99]] = 1.0  # one pixel at 25 km/s, two at the top of the box
+    gal_velocity = np.array([5.0, 500.0, np.nan])
+    one_pixel = 1000.0 / C_KMS * 10.0  # rest-frame EW of one fully absorbed pixel at 1000 Angstrom
+
+    ew = equivalent_width(
+        absorbed=absorbed,
+        velocity=velocity,
+        gal_velocity=gal_velocity,
+        vbox=1000.0,
+        half_width=50.0,
+        wavelength_rest=1000.0,
+    )
+    np.testing.assert_allclose(ew[:2], [3 * one_pixel, 0.0])  # the first window wraps over the box edge
+    assert np.isnan(ew[2])  # no galaxy
+
+    whole = equivalent_width(
+        absorbed=absorbed,
+        velocity=velocity,
+        gal_velocity=gal_velocity,
+        vbox=1000.0,
+        half_width=None,
+        wavelength_rest=1000.0,
+    )
+    np.testing.assert_allclose(whole, 3 * one_pixel)  # every sightline, galaxy or not
 
 
 # line data and profiles
