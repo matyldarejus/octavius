@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .loader import OctaviusCatalogue, GroupCollection
     from ..data_management import SnapshotReader
+    from ..line_absorption.absorption_helpers import Sightlines, SightlineParticles, SightlineSpectra
     import h5py
 
 # default libraries
@@ -286,6 +287,56 @@ class OctaviusAnalyser:
         results.columns["wavelengths"] = wavelengths
 
         return results
+
+    def compute_absorption(
+        self, group_indices: list[int] | np.ndarray | None = None
+    ) -> list[tuple["Sightlines", "SightlineParticles", dict[str, "SightlineSpectra"]]]:
+        """
+
+        Produces mock absorption spectra along sightlines placed around the galaxies specified by group_indices.
+
+
+        Parameters
+        ----------
+        group_indices: list[int]
+            The indices into the Octavius catalogue of the galaxies to place sightlines around.
+
+        Returns
+        ----------
+        results: list[tuple[Sightlines, SightlineParticles, dict[str, SightlineSpectra]]]
+            Tuple containing sightlines, preselected gas, and spectra by line name per projection axis.
+
+        """
+        from ..line_absorption import run_absorption
+        from ..line_absorption.absorption_helpers import LOS_AXIS_IDX, SampleEntries
+
+        # the reader's snapshot may override the config's, and the remaining direct snapshot reads use the config
+        config = replace(self._config, snapshot_path=self._reader.snapshot_path)
+        entries = None
+
+        if group_indices is not None:  # placee sightlines around the given galaxies
+            group_type = "galaxies"
+            if group_type not in self._collections:
+                raise KeyError(f"'{group_type}' is not present in the catalogue.")
+
+            group_indices = np.unique(np.asarray(group_indices, dtype=np.int64))  # avoid repeats
+            n_galaxies = len(self._collections[group_type])
+            if np.any(group_indices < 0) or np.any(group_indices >= n_galaxies):
+                raise IndexError(f"Group indices must lie in [0, {n_galaxies}) for {group_type}.")
+
+            if config.absorption_los_mode != "SAMPLE":
+                logger.debug(
+                    f"Overriding absorption_los_mode '{config.absorption_los_mode}' with SAMPLE for the given galaxies."
+                )
+                config = replace(config, absorption_los_mode="SAMPLE")
+
+            entries = SampleEntries(
+                galaxy_idx=group_indices,
+                los_axis=np.full(len(group_indices), LOS_AXIS_IDX[config.absorption_los_axis], dtype=np.int64),
+                bin_label=None,
+            )
+
+        return run_absorption(config=config, reader=self._reader, catalogue=self._catalogue, entries=entries)
 
     def compute_ptype_specific_properties(self, group_indices: list[int] | np.ndarray, group_type: str) -> StageResult:
         """
