@@ -98,6 +98,7 @@ from octavius.line_absorption.spectrum_processing import (
     load_tabulated_lsf,
     tabulated_lsf,
 )
+from octavius.line_absorption.voigt_fitting import detection_ratio, find_absorption_regions, merge_regions
 from octavius.run_octavius import analyse_snapshot
 from octavius.utils.generate_snapshots import generate_simba_snapshot
 from octavius.utils import load_catalogue
@@ -1327,3 +1328,41 @@ def test_absorption_output_read(absorption_run, tmp_path):
         np.testing.assert_allclose(f["OVI1031/flux"][:], spectrum.flux, atol=1e-6)
         assert f["metadata/config_parameters"].attrs["absorption_snr"] == config.absorption_snr
         assert "redshift" in f["header"]
+
+
+# voigt fitting
+
+NOISE = 0.01
+
+
+def continuum(n_pixels):
+    return 1.0 + 0.005 * (-1.0) ** np.arange(n_pixels)  # crosses 1 every pixel, like noise
+
+
+def absorption_line(n_pixels, centre, depth=0.8, width=2.0):
+    return depth * np.exp(-0.5 * ((np.arange(n_pixels) - centre) / width) ** 2)
+
+
+def test_depths_within_the_noise_are_not_detected():
+    flux = np.full(100, 1.0 - 0.5 * NOISE)
+    assert np.all(detection_ratio(flux=flux, noise=np.full(100, NOISE)) == 0.0)
+    assert len(find_absorption_regions(flux=flux, noise=np.full(100, NOISE), n_sigma=10.0)) == 0
+
+
+def test_a_single_line_gives_one_region_around_it():
+    flux = continuum(300) - absorption_line(300, centre=150)
+    regions = find_absorption_regions(flux=flux, noise=np.full(300, NOISE), n_sigma=10.0)
+    assert len(regions) == 1
+    start, end = regions[0]
+    assert 90 < start < 150 < end < 210  # contains the line, not the whole spectrum
+
+
+def test_lines_at_the_spectrum_edges_are_detected():
+    flux = continuum(300) - absorption_line(300, centre=1) - absorption_line(300, centre=298)
+    regions = find_absorption_regions(flux=flux, noise=np.full(300, NOISE), n_sigma=10.0)
+    assert regions[0, 0] == 0 and regions[-1, 1] == 300  # pygad dropped both
+
+
+def test_merge_regions_joins_chains_and_pads_within_the_spectrum():
+    regions = merge_regions(starts=np.array([10, 17, 24, 60]), ends=np.array([15, 22, 30, 70]), n_pixels=71)
+    np.testing.assert_array_equal(regions, [[8, 32], [58, 71]])  # chain of three merged; end clamped
