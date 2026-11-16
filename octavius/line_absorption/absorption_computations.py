@@ -143,7 +143,7 @@ def profile_half_width(column, b, xsec, gamma):
 
 
 @njit(cache=True)
-def _deposit_line(tau_row, weighted_rows, values, column, v, b, gamma, dv, half_width):
+def deposit_line(tau_row, weighted_rows, values, column, v, b, gamma, dv, half_width):
     """
 
     Adds one particle's column, spread over the pixels by its bin-integrated line profile, to one sightline:
@@ -240,7 +240,7 @@ def optical_depth(
             if column <= 0.0:
                 continue
             half_width = profile_half_width(column, b_line[m], line.xsec, line.gamma)
-            _deposit_line(tau[los], weighted[los], weights[m], column, v_line[m], b_line[m], line.gamma, dv, half_width)
+            deposit_line(tau[los], weighted[los], weights[m], column, v_line[m], b_line[m], line.gamma, dv, half_width)
 
         for k in range(n_bins):
             if tau[los, k] > 0.0:

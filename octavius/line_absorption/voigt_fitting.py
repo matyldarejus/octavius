@@ -19,6 +19,9 @@ from scipy.ndimage import convolve1d
 
 # internal imports
 from ..log import get_logger
+from .absorption_computations import deposit_line, profile_half_width
+from .absorption_helpers import LineConstants
+from .spectrum_processing import apply_lsf
 
 logger = get_logger()
 
@@ -94,3 +97,33 @@ def find_absorption_regions(*, flux: np.ndarray, noise: np.ndarray, n_sigma: flo
     significant = np.sqrt(cumulative[ends] - cumulative[starts]) > n_sigma
 
     return merge_regions(starts=starts[significant], ends=ends[significant], n_pixels=n_pixels)
+
+
+def component_tau(
+    *, log_column: float, b: float, v: float, line: LineConstants, n_pixels: int, dv: float
+) -> np.ndarray:
+    """
+
+    Optical depth of one component (log10 N in cm^-2, Doppler parameter b and centre v in km/s) on a periodic grid
+    of n_pixels pixels of width dv, deposited the same way as when synthesis (see notes in
+    absorption_computations.deposit_line).
+
+    """
+    column = 10.0**log_column
+    tau = np.zeros(n_pixels)
+    half_width = profile_half_width(column, b, line.xsec, line.gamma)
+    deposit_line(tau, np.zeros((0, n_pixels)), np.zeros(0), column, v, b, line.gamma, dv, half_width)
+    return tau * (line.xsec / dv)
+
+
+def model_flux(*, components: np.ndarray, line: LineConstants, n_pixels: int, dv: float, kernel: np.ndarray):
+    """
+
+    Model flux of the components (rows of log10 N, b, v) as observed: exp(-tau) of their summed optical depth,
+    convolved with the LSF kernel.
+
+    """
+    tau = np.zeros(n_pixels)
+    for log_column, b, v in components:
+        tau += component_tau(log_column=log_column, b=b, v=v, line=line, n_pixels=n_pixels, dv=dv)
+    return apply_lsf(flux=np.exp(-tau)[None, :], kernel=kernel)[0]  # works on rows, so need to fix with indexing

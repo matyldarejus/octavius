@@ -50,6 +50,7 @@ from octavius.line_absorption.absorption_helpers import (
     GAS_LAYOUTS,
     KERNEL_IDX,
     LOS_AXIS_IDX,
+    LineConstants,
     SightlineParams,
     SightlineParticles,
     Sightlines,
@@ -98,7 +99,13 @@ from octavius.line_absorption.spectrum_processing import (
     load_tabulated_lsf,
     tabulated_lsf,
 )
-from octavius.line_absorption.voigt_fitting import detection_ratio, find_absorption_regions, merge_regions
+from octavius.line_absorption.voigt_fitting import (
+    component_tau,
+    detection_ratio,
+    find_absorption_regions,
+    merge_regions,
+    model_flux,
+)
 from octavius.run_octavius import analyse_snapshot
 from octavius.utils.generate_snapshots import generate_simba_snapshot
 from octavius.utils import load_catalogue
@@ -1333,6 +1340,7 @@ def test_absorption_output_read(absorption_run, tmp_path):
 # voigt fitting
 
 NOISE = 0.01
+GAUSSIAN_LINE = LineConstants(xsec=1.0, b_0=1.0, gamma=0.0)  # unit cross-section, no damping
 
 
 def continuum(n_pixels):
@@ -1366,3 +1374,23 @@ def test_lines_at_the_spectrum_edges_are_detected():
 def test_merge_regions_joins_chains_and_pads_within_the_spectrum():
     regions = merge_regions(starts=np.array([10, 17, 24, 60]), ends=np.array([15, 22, 30, 70]), n_pixels=71)
     np.testing.assert_array_equal(regions, [[8, 32], [58, 71]])  # chain of three merged; end clamped
+
+
+def test_component_tau_integrates_to_the_column():
+    tau = component_tau(log_column=2.0, b=10.0, v=500.0, line=GAUSSIAN_LINE, n_pixels=400, dv=2.5)
+    assert np.sum(tau) * 2.5 == pytest.approx(100.0, rel=1e-12)  # sum tau dv = xsec N
+
+
+def test_component_tau_wraps_around_the_box():
+    centre = component_tau(log_column=2.0, b=10.0, v=500.0, line=GAUSSIAN_LINE, n_pixels=400, dv=2.5)
+    edge = component_tau(log_column=2.0, b=10.0, v=1000.0, line=GAUSSIAN_LINE, n_pixels=400, dv=2.5)
+    np.testing.assert_allclose(edge, np.roll(centre, 200), atol=1e-12)  # 500 km/s = 200 pixels further on
+
+
+def test_model_flux_lsf_conserves_the_equivalent_width():
+    components = np.array([[1.5, 10.0, 300.0], [1.0, 20.0, 700.0]])
+    kwargs = {"components": components, "line": GAUSSIAN_LINE, "n_pixels": 400, "dv": 2.5}
+    intrinsic = model_flux(**kwargs, kernel=np.ones(1))
+    observed = model_flux(**kwargs, kernel=gaussian_lsf(resolving_power=40000.0, dv=2.5))
+    assert np.min(observed) > np.min(intrinsic)  # the LSF makes lines shallower...
+    assert np.sum(1.0 - observed) == pytest.approx(np.sum(1.0 - intrinsic), rel=1e-10)  # ...but keeps their E
