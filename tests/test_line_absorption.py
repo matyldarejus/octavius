@@ -100,10 +100,14 @@ from octavius.line_absorption.spectrum_processing import (
     tabulated_lsf,
 )
 from octavius.line_absorption.voigt_fitting import (
+    SpectrumToFit,
+    component_errors,
     component_tau,
     detection_ratio,
+    fit_components,
     find_absorption_regions,
     merge_regions,
+    model_derivatives,
     model_flux,
 )
 from octavius.run_octavius import analyse_snapshot
@@ -1394,3 +1398,48 @@ def test_model_flux_lsf_conserves_the_equivalent_width():
     observed = model_flux(**kwargs, kernel=gaussian_lsf(resolving_power=40000.0, dv=2.5))
     assert np.min(observed) > np.min(intrinsic)  # the LSF makes lines shallower...
     assert np.sum(1.0 - observed) == pytest.approx(np.sum(1.0 - intrinsic), rel=1e-10)  # ...but keeps their E
+
+
+def spectrum_to_fit(flux, kernel):
+    noise = np.full(len(flux), NOISE)
+    return SpectrumToFit(
+        flux=flux,
+        noise=noise,
+        dv=2.5,
+        line=GAUSSIAN_LINE,
+        kernel=kernel,
+        log_column_bounds=(0.0, 4.0),
+        b_bounds=(1.0, 100.0),
+    )
+
+
+def test_model_derivatives_match_finite_differences():
+    spectrum = spectrum_to_fit(np.ones(400), kernel=gaussian_lsf(resolving_power=40000.0, dv=2.5))
+    components = np.array([[1.5, 15.0, 500.0]])  # log N, b, v
+    derivatives = model_derivatives(spectrum=spectrum, components=components)
+    for parameter in range(3):
+        shifted = components.copy()
+        shifted[0, parameter] += 1e-5
+        numerical = (spectrum.model(shifted) - spectrum.model(components)) / 1e-5
+        np.testing.assert_allclose(derivatives[parameter], numerical, atol=1e-4)
+
+
+def test_fit_components_recovers_a_noiseless_component():
+    kernel = gaussian_lsf(resolving_power=40000.0, dv=2.5)
+    true = np.array([[1.5, 15.0, 500.0]])
+    flux = model_flux(components=true, line=GAUSSIAN_LINE, n_pixels=400, dv=2.5, kernel=kernel)
+    start = np.array([[1.2, 25.0, 510.0]])
+
+    fit, errors = fit_components(
+        spectrum=spectrum_to_fit(flux, kernel=kernel),
+        components=start,
+        pixels=slice(150, 250),
+        v_bounds=np.array([[375.0, 625.0]]),
+    )
+    np.testing.assert_allclose(fit, true, rtol=1e-5)
+    assert np.all(np.isfinite(errors))
+
+
+def test_component_errors_are_infinite_for_unconstrained_parameters():
+    jacobian = np.array([[2.0, 0.0]])  # the second parameter has no effect on the fit
+    np.testing.assert_allclose(component_errors(jacobian=jacobian), [0.5, np.inf])
