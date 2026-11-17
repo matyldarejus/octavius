@@ -413,3 +413,48 @@ def fit_region(*, spectrum: SpectrumToFit, pixels: slice, max_components: int, c
             break
         components, chisq = trial, trial_chisq
     return prune_components(spectrum=spectrum, components=components, pixels=pixels)
+
+
+def fit_in_box(
+    *, spectrum: SpectrumToFit, components: np.ndarray, regions: np.ndarray, region_index: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """
+
+    Fits all components together over the whole box, keeping each centre inside its own region, and
+    returns them with their errors and total chi2.
+
+    """
+    whole_box = slice(0, spectrum.n_pixels)
+    v_bounds = regions[region_index] * spectrum.dv
+    fit, errors = fit_components(spectrum=spectrum, components=components, pixels=whole_box, v_bounds=v_bounds)
+    return fit, errors, total_chisq(spectrum=spectrum, components=fit, pixels=whole_box)
+
+
+def fit_jointly(
+    *, spectrum: SpectrumToFit, components: np.ndarray, regions: np.ndarray, region_index: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+
+    Refits the components of all regions together, so that line wings reaching into neighbouring regions are
+    accounted for, then removes components, weakest first and one at a time with a refit, whenever this raises
+    the total chi2 by less than DCHISQ_PER_COMPONENT.
+
+    Returns the components, their errors and the region each belongs to.
+
+    """
+    fit, errors, chisq = fit_in_box(
+        spectrum=spectrum, components=components, regions=regions, region_index=region_index
+    )
+    changed = True
+    while changed and len(fit) > 0:
+        changed = False
+        for i in np.argsort(fit[:, 0]):
+            keep = np.arange(len(fit)) != i
+            trial, trial_errors, trial_chisq = fit_in_box(
+                spectrum=spectrum, components=fit[keep], regions=regions, region_index=region_index[keep]
+            )
+            if trial_chisq - chisq < DCHISQ_PER_COMPONENT:
+                fit, errors, region_index, chisq, changed = trial, trial_errors, region_index[keep], trial_chisq, True
+                break
+
+    return fit, errors, region_index

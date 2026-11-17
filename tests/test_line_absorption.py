@@ -105,6 +105,7 @@ from octavius.line_absorption.voigt_fitting import (
     component_tau,
     detection_ratio,
     fit_components,
+    fit_jointly,
     fit_region,
     find_absorption_regions,
     merge_regions,
@@ -1479,3 +1480,17 @@ def test_fit_region_finds_both_lines_of_a_blend():
     spectrum = spectrum_to_fit(flux, kernel=np.ones(1))
     fit = fit_region(spectrum=spectrum, pixels=slice(150, 260), max_components=5, chisq_factor=0.95)
     np.testing.assert_allclose(fit[np.argsort(fit[:, 2])], true, rtol=1e-4)
+
+
+def test_fit_jointly_keeps_both_regions_and_removes_a_spurious_component():
+    true = np.array([[1.5, 15.0, 300.0], [1.5, 15.0, 700.0]])
+    flux = model_flux(components=true, line=GAUSSIAN_LINE, n_pixels=400, dv=2.5, kernel=np.ones(1))
+    spectrum = spectrum_to_fit(flux, kernel=np.ones(1))
+    regions = np.array([[100, 140], [260, 300]])  # 250-350 and 650-750 km/s
+    start = np.array([[1.4, 12.0, 305.0], [0.5, 10.0, 320.0], [1.6, 18.0, 695.0]])  # middle one is spurious
+
+    fit, _, region_index = fit_jointly(
+        spectrum=spectrum, components=start, regions=regions, region_index=np.array([0, 0, 1])
+    )
+    np.testing.assert_allclose(fit, true, rtol=1e-4)
+    np.testing.assert_array_equal(region_index, [0, 1])
