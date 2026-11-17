@@ -37,6 +37,7 @@ GUESS_LOG_COLUMNS = 100  # grid points iin log N for a starting guess
 GUESS_B_VALUES = 40  # grid points in b for a starting guess
 GUESS_FLOOR_SIGMA = 1.5  # a guess may not dip more than this many sigma below the smoothed residual
 GUESS_SMOOTHING = 1.0  # pixels, Gaussian width for smoothing the residual
+DCHISQ_PER_COMPONENT = 6.0  # a component must lower the total chi2 by this much
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,3 +317,99 @@ def split_component(*, components: np.ndarray, index: int) -> np.ndarray:
         [[log_column - np.log10(2.0), 0.7 * b, v - 0.5 * b], [log_column - np.log10(2.0), 0.7 * b, v + 0.5 * b]]
     )
     return np.vstack((np.delete(components, index, axis=0), halves))
+
+
+def total_chisq(*, spectrum: SpectrumToFit, components: np.ndarray, pixels: slice) -> float:
+    """
+
+    Total chi2 of the components' model over the pixels.
+
+    """
+    residuals = (spectrum.flux[pixels] - spectrum.model(components)[pixels]) / spectrum.noise[pixels]
+    return float(np.sum(residuals**2))
+
+
+def fit_in_region(*, spectrum: SpectrumToFit, components: np.ndarray, pixels: slice) -> tuple[np.ndarray, float]:
+    """
+
+    Fits the components over the pixels of a region, keeping every centre inside it, and returns them with
+    their total chi2.
+
+    """
+    v_bounds = np.tile([pixels.start * spectrum.dv, pixels.stop * spectrum.dv], (len(components), 1))
+    fit, _ = fit_components(spectrum=spectrum, components=components, pixels=pixels, v_bounds=v_bounds)
+    return fit, total_chisq(spectrum=spectrum, components=fit, pixels=pixels)
+
+
+def add_component(*, spectrum: SpectrumToFit, components: np.ndarray, pixels: slice) -> np.ndarray:
+    """
+
+    Appends a starting guess for a new component at the deepest absorption the components do not explain.
+
+    """
+    residual = 1.0 + spectrum.flux - spectrum.model(components)
+    guess = starting_guess(spectrum=spectrum, residual=residual, pixels=pixels)
+    if np.any(np.isclose(components[:, 2], guess[2], rtol=0.0, atol=10e-9)):  # same params as vpfit
+        guess[2] += 0.5 * spectrum.dv  # never start two components at the same centre
+    return np.vstack((components, guess))
+
+
+def simpler_models(components: np.ndarray) -> list[np.ndarray]:
+    """
+
+    Every model with one component fewer: each component removed, weakest first, then each pair of neighbours
+    in velocity merged into one with total column and column-weighted b and v.
+
+    """
+    removed = [np.delete(components, i, axis=0) for i in np.argsort(components[:, 0])]
+    merged = []
+    order = np.argsort(components[:, 2])
+    for i, k in zip(order[:-1], order[1:]):
+        columns = 10.0 ** components[[i, k], 0]
+        b, v = columns @ components[[i, k], 1:] / np.sum(columns)
+        merged.append(np.vstack((np.delete(components, [i, k], axis=0), [np.log10(np.sum(columns)), b, v])))
+    return removed + merged
+
+
+def prune_components(*, spectrum: SpectrumToFit, components: np.ndarray, pixels: slice) -> np.ndarray:
+    """
+
+    Replaces the components by a simpler model, refitted, whenever it raises the total chi2 by less than
+    DCHISQ_PER_COMPONENT, until no simpler model does.
+
+    """
+    chisq = total_chisq(spectrum=spectrum, components=components, pixels=pixels)
+    changed = True
+    while changed and len(components) > 0:
+        changed = False
+        for trial in simpler_models(components):
+            trial, trial_chisq = fit_in_region(spectrum=spectrum, components=trial, pixels=pixels)
+            if trial_chisq - chisq < DCHISQ_PER_COMPONENT:
+                components, chisq, changed = trial, trial_chisq, True
+                break
+    return components
+
+
+def fit_region(*, spectrum: SpectrumToFit, pixels: slice, max_components: int, chisq_factor: float) -> np.ndarray:
+    """
+
+    Fits a region with components added one at a time, each either a new line at the deepest unexplained
+    absorption or a split of an existing one, whichever fits best.
+
+    A component is kept while it lowers the total chi2 by at least DCHISQ_PER_COMPONENT and to at most
+    chisq_factor of its previous value; the components are then pruned.
+
+    """
+    first = add_component(spectrum=spectrum, components=np.zeros((0, 3)), pixels=pixels)
+    components, chisq = fit_in_region(spectrum=spectrum, components=first, pixels=pixels)
+    while len(components) < max_components:
+        candidates = [add_component(spectrum=spectrum, components=components, pixels=pixels)]
+        candidates += [split_component(components=components, index=i) for i in range(len(components))]
+        fits = [fit_in_region(spectrum=spectrum, components=candidate, pixels=pixels) for candidate in candidates]
+        trial, trial_chisq = min(fits, key=lambda fit: fit[1])
+        if not np.isfinite(trial_chisq):
+            break
+        if chisq - trial_chisq < DCHISQ_PER_COMPONENT or trial_chisq > chisq_factor * chisq:
+            break
+        components, chisq = trial, trial_chisq
+    return prune_components(spectrum=spectrum, components=components, pixels=pixels)

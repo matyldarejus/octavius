@@ -105,10 +105,12 @@ from octavius.line_absorption.voigt_fitting import (
     component_tau,
     detection_ratio,
     fit_components,
+    fit_region,
     find_absorption_regions,
     merge_regions,
     model_derivatives,
     model_flux,
+    simpler_models,
     split_component,
     starting_guess,
 )
@@ -1461,3 +1463,19 @@ def test_split_component_halves_the_column_either_side_of_the_centre():
     split = split_component(components=components, index=0)
     halves = [[2.0 - np.log10(2.0), 14.0, 490.0], [2.0 - np.log10(2.0), 14.0, 510.0]]
     np.testing.assert_allclose(split, [[1.0, 10.0, 800.0], *halves])
+
+
+def test_simpler_models_remove_the_weakest_first_and_merge_neighbours():
+    components = np.array([[2.0, 10.0, 500.0], [1.0, 21.0, 610.0]])
+    removed_weakest, removed_strongest, merged = simpler_models(components)
+    np.testing.assert_array_equal(removed_weakest, [[2.0, 10.0, 500.0]])
+    np.testing.assert_array_equal(removed_strongest, [[1.0, 21.0, 610.0]])
+    np.testing.assert_allclose(merged, [[np.log10(110.0), 11.0, 510.0]])  # columns 100 and 10
+
+
+def test_fit_region_finds_both_lines_of_a_blend():
+    true = np.array([[1.3, 10.0, 480.0], [1.3, 10.0, 530.0]])
+    flux = model_flux(components=true, line=GAUSSIAN_LINE, n_pixels=400, dv=2.5, kernel=np.ones(1))
+    spectrum = spectrum_to_fit(flux, kernel=np.ones(1))
+    fit = fit_region(spectrum=spectrum, pixels=slice(150, 260), max_components=5, chisq_factor=0.95)
+    np.testing.assert_allclose(fit[np.argsort(fit[:, 2])], true, rtol=1e-4)
