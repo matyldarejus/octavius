@@ -106,6 +106,7 @@ from octavius.line_absorption.voigt_fitting import (
     detection_ratio,
     fit_components,
     fit_jointly,
+    fit_sightline,
     fit_region,
     find_absorption_regions,
     merge_regions,
@@ -1494,3 +1495,24 @@ def test_fit_jointly_keeps_both_regions_and_removes_a_spurious_component():
     )
     np.testing.assert_allclose(fit, true, rtol=1e-4)
     np.testing.assert_array_equal(region_index, [0, 1])
+
+
+def test_fit_sightline_recovers_a_line_across_the_box_edge():
+    true = np.array([[1.5, 15.0, 400.0], [1.5, 15.0, 995.0]])  # box is 1000 km/s
+    flux = model_flux(components=true, line=GAUSSIAN_LINE, n_pixels=400, dv=2.5, kernel=np.ones(1))
+    flux += continuum(400) - 1.0
+    lines = fit_sightline(
+        flux=flux,
+        noise=np.full(400, NOISE),
+        dv=2.5,
+        line=GAUSSIAN_LINE,
+        kernel=np.ones(1),
+        log_column_bounds=(0.0, 4.0),
+        b_bounds=(1.0, 100.0),
+        n_sigma=3.0,
+        max_components=5,
+        chisq_factor=0.95,
+    )
+    fit = lines.components[np.argsort(lines.components[:, 2])]
+    np.testing.assert_allclose(fit[:, 0], true[:, 0], atol=0.05)
+    np.testing.assert_allclose(fit[:, 2], true[:, 2], atol=5.0)

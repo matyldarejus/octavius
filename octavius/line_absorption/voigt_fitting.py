@@ -38,6 +38,7 @@ GUESS_B_VALUES = 40  # grid points in b for a starting guess
 GUESS_FLOOR_SIGMA = 1.5  # a guess may not dip more than this many sigma below the smoothed residual
 GUESS_SMOOTHING = 1.0  # pixels, Gaussian width for smoothing the residual
 DCHISQ_PER_COMPONENT = 6.0  # a component must lower the total chi2 by this much
+MIN_REGION_PIXELS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +68,22 @@ class SpectrumToFit:
 
         """
         return model_flux(components=components, line=self.line, n_pixels=self.n_pixels, dv=self.dv, kernel=self.kernel)
+
+
+@dataclass(frozen=True, slots=True)
+class LineList:
+    """
+
+    Fitted components of one sightline.
+
+    """
+
+    components: np.ndarray  # log10 N in com^-2, b and v in km/s
+    errors: np.ndarray  # 1 sigma
+    equivalent_width: np.ndarray  # km/s, of eah component alone over its region
+    reduced_chisq: np.ndarray  # chi2 per pixel of the full model over each component's region
+    region: np.ndarray  # index of each component's region
+    regions: np.ndarray  # pixel ranges
 
 
 def detection_ratio(*, flux: np.ndarray, noise: np.ndarray) -> np.ndarray:
@@ -458,3 +475,82 @@ def fit_jointly(
                 break
 
     return fit, errors, region_index
+
+
+def fit_sightline(
+    *,
+    flux: np.ndarray,
+    noise: np.ndarray,
+    dv: float,
+    line: LineConstants,
+    kernel: np.ndarray,
+    log_column_bounds: tuple[float, float],
+    b_bounds: tuple[float, float],
+    n_sigma: float,
+    max_components: int,
+    chisq_factor: float,
+) -> LineList:
+    """
+
+    Fits Voigt components to a periodic spectrum: finds the absorption regions, fits each one, then refits all
+    components together over the whole box,
+
+    The spectrum is rolled to start at its least absorbed pixel so that no region crosses the box edge, and
+    the results are shifted back to the original grid.
+
+    """
+    # roll the spectrum
+    shift = int(np.argmax(flux))  # find pixel with highest flux
+    spectrum = SpectrumToFit(
+        flux=np.roll(flux, -shift),
+        noise=np.roll(noise, -shift),
+        dv=dv,
+        line=line,
+        kernel=kernel,
+        log_column_bounds=log_column_bounds,
+        b_bounds=b_bounds,
+    )
+    # find the absorption regions
+    regions = find_absorption_regions(flux=spectrum.flux, noise=spectrum.noise, n_sigma=n_sigma)
+
+    # fit each region on its own
+    found, found_in = [np.zeros((0, 3))], [np.zeros(0, dtype=np.int64)]
+    for i, (start, stop) in enumerate(regions):
+        if stop - start < MIN_REGION_PIXELS:
+            continue
+        components = fit_region(
+            spectrum=spectrum, pixels=slice(start, stop), max_components=max_components, chisq_factor=chisq_factor
+        )
+        found.append(components)
+        found_in.append(np.full(len(components), i, dtype=np.int64))
+
+    # fit all components together
+    components, errors, region_index = fit_jointly(
+        spectrum=spectrum, components=np.vstack(found), regions=regions, region_index=np.concatenate(found_in)
+    )
+
+    grid = {"line": line, "n_pixels": spectrum.n_pixels, "dv": dv}
+    equivalent_width = np.empty(len(components))
+    reduced_chisq = np.empty(len(components))
+
+    # compute outputs for each component
+    for j, ((log_column, b, v), i) in enumerate(zip(components, region_index)):
+        pixels = slice(*regions[i])
+        tau = component_tau(log_column=log_column, b=b, v=v, **grid)[pixels]
+        equivalent_width[j] = np.sum(1.0 - np.exp(-tau)) * dv
+        chisq = total_chisq(spectrum=spectrum, components=components, pixels=pixels)
+        reduced_chisq[j] = chisq / (pixels.stop - pixels.start)
+
+    # undo the roll and go back to the original grid
+    components[:, 2] = (components[:, 2] + shift * dv) % (spectrum.n_pixels * dv)
+    regions = regions + shift
+    regions[regions[:, 0] >= spectrum.n_pixels] -= spectrum.n_pixels
+
+    return LineList(
+        components=components,
+        errors=errors,
+        equivalent_width=equivalent_width,
+        reduced_chisq=reduced_chisq,
+        region=region_index,
+        regions=regions,
+    )
