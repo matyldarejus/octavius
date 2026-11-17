@@ -151,6 +151,7 @@ class SightlineSpectra:
     n90: np.ndarray  # (n_los,) particles making up 90% of the column
     ew: np.ndarray  # (n_los,) rest-frame EW from flux (LSF + noise), in Angstrom
     ew_intrinsic: np.ndarray  # (n_los,) rest-frame EW from exp(-tau), in Angstrom
+    kernel: np.ndarray  # LSF kernel on the pixel grid, applied to exp(-tau)
 
     @property
     def n_los(self) -> int:

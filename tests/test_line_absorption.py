@@ -1516,3 +1516,16 @@ def test_fit_sightline_recovers_a_line_across_the_box_edge():
     fit = lines.components[np.argsort(lines.components[:, 2])]
     np.testing.assert_allclose(fit[:, 0], true[:, 0], atol=0.05)
     np.testing.assert_allclose(fit[:, 2], true[:, 2], atol=5.0)
+
+
+def test_voigt_fit_requires_noise():
+    with pytest.raises(ValueError, match="absorption_snr"):
+        OctaviusConfig(
+            snapshot_path=Path("null"),
+            output_dir=Path("null"),
+            simulation_type="SIMBA",
+            halo_id_source="SNAPSHOT",
+            absorption_voigt_fit=True,
+            absorption_snr=None,
+            cores_per_rank=1,
+        )

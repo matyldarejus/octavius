@@ -114,6 +114,9 @@ ALWAYS_POSITIVE = frozenset(
         "n_random_los",
         "absorption_pixel_kms",
         "absorption_resolving_power",
+        "absorption_voigt_n_sigma",
+        "absorption_voigt_max_components",
+        "absorption_voigt_b_bounds",
     }
 )
 
@@ -252,6 +255,12 @@ class OctaviusConfig:
     absorption_resolving_power: float = 40000.0
     absorption_snr: float | None = 30.0
     absorption_ew_window: float | None = 600.0
+    absorption_voigt_fit: bool = False
+    absorption_voigt_n_sigma: float = 10.0
+    absorption_voigt_max_components: int = 15
+    absorption_voigt_chisq_factor: float = 0.95
+    absorption_voigt_log_column_bounds: list[float] = field(default_factory=lambda: [12.0, 19.0])
+    absorption_voigt_b_bounds: list[float] = field(default_factory=lambda: [1.0, 100.0])
 
     terminal_output_level: str = "INFO"
     keep_logs: bool = False
@@ -341,6 +350,16 @@ class OctaviusConfig:
 
         if self.absorption_ew_window is not None and self.absorption_ew_window <= 0:
             raise ValueError("'absorption_ew_window' must be positive, or blank for the whole sightline.")
+
+        if self.absorption_voigt_fit and self.absorption_snr is None:
+            raise ValueError("'absorption_voigt_fit' needs 'absorption_snr', as the fit weighs residuals by the noise.")
+
+        if not 0.0 < self.absorption_voigt_chisq_factor <= 1.0:
+            raise ValueError("'absorption_voigt_chisq_factor' must lie in (0, 1].")
+
+        for bounds in ("absorption_voigt_log_column_bounds", "absorption_voigt_b_bounds"):
+            if len(getattr(self, bounds)) != 2 or getattr(self, bounds)[0] >= getattr(self, bounds)[1]:
+                raise ValueError(f"'{bounds}' must be [lower, upper] with lower < upper.")
 
     @classmethod
     def from_yaml(cls, config_path: Path | str, **overrides: Any) -> OctaviusConfig:

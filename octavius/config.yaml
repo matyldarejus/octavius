@@ -98,7 +98,14 @@ line_absorption:
   absorption_lsf:             GAUSSIAN              # none, gaussian, or tabulated (e.g. cos_g130m)
   absorption_resolving_power: 40000                 # for gaussian lsf; HWO baseline (Dressing et al. (2026))
   absorption_snr:             30
-  absorption_ew_window:       600                   
+  absorption_ew_window:       600              
+  # voigt fitter
+  absorption_voigt_fit:               false
+  absorption_voigt_n_sigma:           10        # detection threshold for an absorption region
+  absorption_voigt_max_components:    15        # per region
+  absorption_voigt_chisq_factor:      0.95      # a new component must lower chi2 to at most this fraction
+  absorption_voigt_log_column_bounds: [12, 19]  # log10 cm^-2
+  absorption_voigt_b_bounds:          [1, 100]  # km/s
 
 parallelism:
   n_io_chunks:        10    # for IO reads on datasets, not chunking the pipeline

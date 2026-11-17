@@ -675,6 +675,7 @@ def _sightline_set_spectrum(
         n90=column_n90(particles.los_offsets, member_column),
         ew=equivalent_width(absorbed=1.0 - flux, **window),
         ew_intrinsic=equivalent_width(absorbed=1.0 - np.exp(-tau), **window),
+        kernel=kernel,
     )
 
 
