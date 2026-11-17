@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 # other packages
 import numpy as np
-from scipy.ndimage import convolve1d
+from scipy.ndimage import convolve1d, gaussian_filter1d
 from scipy.optimize import least_squares
 
 
@@ -33,6 +33,10 @@ REGION_MERGE_GAP = 5  # regions closer than this number of pixels are merged
 REGION_PAD = 2  # number of pixels to be added on to each side of a region
 DERIVATIVE_STEP = 1.0e-3  # central-difference step
 BOUND_MARGIN = 1.0e-6  # start parameters are moved by this fraction of their range inside the bounds
+GUESS_LOG_COLUMNS = 100  # grid points iin log N for a starting guess
+GUESS_B_VALUES = 40  # grid points in b for a starting guess
+GUESS_FLOOR_SIGMA = 1.5  # a guess may not dip more than this many sigma below the smoothed residual
+GUESS_SMOOTHING = 1.0  # pixels, Gaussian width for smoothing the residual
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,3 +266,53 @@ def fit_components(
 
     result = least_squares(residuals, start, jac=jacobian, bounds=(lower, upper), method="trf", x_scale="jac")
     return result.x.reshape(-1, 3), component_errors(jacobian=result.jac).reshape(-1, 3)
+
+
+def starting_guess(*, spectrum: SpectrumToFit, residual: np.ndarray, pixels: slice) -> np.ndarray:
+    """
+
+    Starting set of parameters for a new component in a region. This is centred on the deepest pixel of the
+    smoothed, with the (N, b) on a grid that best matches the residual around the line core without dipping
+    more than GUESS_FLOOR_SIGMA below it anywhere in the region. The guess is not convolved with the LSF.
+
+    """
+    smoothed = gaussian_filter1d(residual, GUESS_SMOOTHING, mode="wrap")[pixels]  # find the centre
+    residual, noise = residual[pixels], spectrum.noise[pixels]
+    centre = int(np.argmin(smoothed))
+    v = (pixels.start + centre + 0.5) * spectrum.dv
+    floor = np.minimum(smoothed, 1.0) - GUESS_FLOOR_SIGMA * noise  # set a floor
+
+    log_columns = np.linspace(*spectrum.log_column_bounds, GUESS_LOG_COLUMNS)  # try every (N, b) on a grid
+    b_values = np.geomspace(*spectrum.b_bounds, GUESS_B_VALUES)
+    grid = {"line": spectrum.line, "n_pixels": spectrum.n_pixels, "dv": spectrum.dv}
+
+    chisq = np.full((GUESS_B_VALUES, GUESS_LOG_COLUMNS), np.inf)
+    for j, b in enumerate(b_values):
+        largest = log_columns[-1]  # widest deposit window, then scaled down to every column
+        unit_tau = component_tau(log_column=largest, b=b, v=v, **grid)[pixels] / 10.0**largest
+        flux = np.exp(-(10.0 ** log_columns[:, None]) * unit_tau)
+        depth = 1.0 - flux
+        half_depth = depth > 0.5 * depth[:, centre, None]
+        half_depth[:, centre] = True  # pygad's window always holds the centre
+        core = half_depth.copy()
+        core[:, 1:] |= half_depth[:, :-1]  # plus the first pixel past half depth on each side, as in pygad
+        core[:, :-1] |= half_depth[:, 1:]
+        core_chisq = np.sum(np.where(core, ((residual - flux) / noise) ** 2, 0.0), axis=1) / np.sum(core, axis=1)
+        above_floor = np.all(flux >= floor, axis=1)  # throw out everything above the floor
+        chisq[j] = np.where(above_floor, core_chisq, np.inf)
+
+    j, i = np.unravel_index(np.argmin(chisq), chisq.shape)  # pick the ones with the lowest score
+    return np.array([log_columns[i], b_values[j], v])
+
+
+def split_component(*, components: np.ndarray, index: int) -> np.ndarray:
+    """
+
+    Replaces component index by two with half with its column and 0.7 its b, at v -+ b / 2, appended at the end.
+
+    """
+    log_column, b, v = components[index]
+    halves = np.array(
+        [[log_column - np.log10(2.0), 0.7 * b, v - 0.5 * b], [log_column - np.log10(2.0), 0.7 * b, v + 0.5 * b]]
+    )
+    return np.vstack((np.delete(components, index, axis=0), halves))

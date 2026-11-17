@@ -109,6 +109,8 @@ from octavius.line_absorption.voigt_fitting import (
     merge_regions,
     model_derivatives,
     model_flux,
+    split_component,
+    starting_guess,
 )
 from octavius.run_octavius import analyse_snapshot
 from octavius.utils.generate_snapshots import generate_simba_snapshot
@@ -1443,3 +1445,19 @@ def test_fit_components_recovers_a_noiseless_component():
 def test_component_errors_are_infinite_for_unconstrained_parameters():
     jacobian = np.array([[2.0, 0.0]])  # the second parameter has no effect on the fit
     np.testing.assert_allclose(component_errors(jacobian=jacobian), [0.5, np.inf])
+
+
+def test_starting_guess_is_close_to_a_noiseless_line():
+    true = np.array([[1.5, 15.0, 501.25]])  # centred on pixel 200
+    flux = model_flux(components=true, line=GAUSSIAN_LINE, n_pixels=400, dv=2.5, kernel=np.ones(1))
+    guess = starting_guess(spectrum=spectrum_to_fit(flux, kernel=np.ones(1)), residual=flux, pixels=slice(150, 250))
+    assert guess[2] == pytest.approx(501.25)
+    assert guess[0] == pytest.approx(1.5, abs=0.2)
+    assert guess[1] == pytest.approx(15.0, rel=0.3)
+
+
+def test_split_component_halves_the_column_either_side_of_the_centre():
+    components = np.array([[2.0, 20.0, 500.0], [1.0, 10.0, 800.0]])
+    split = split_component(components=components, index=0)
+    halves = [[2.0 - np.log10(2.0), 14.0, 490.0], [2.0 - np.log10(2.0), 14.0, 510.0]]
+    np.testing.assert_allclose(split, [[1.0, 10.0, 800.0], *halves])
