@@ -51,6 +51,7 @@ from octavius.line_absorption.absorption_helpers import (
     KERNEL_IDX,
     LOS_AXIS_IDX,
     LineConstants,
+    SightlineLineLists,
     SightlineParams,
     SightlineParticles,
     Sightlines,
@@ -59,6 +60,7 @@ from octavius.line_absorption.absorption_helpers import (
     plane_axes,
 )
 from octavius.line_absorption.absorption_output import (
+    _write_line_lists,
     write_absorption_spectra,
 )
 from octavius.line_absorption.ion_tables import (
@@ -1334,8 +1336,14 @@ def test_absorption_output_read(absorption_run, tmp_path):
     )
     internals = load_internals(internals_filepath=INTERNALS_PATH, config=config)
     path = tmp_path / "spectra.hdf5"
+    line_lists = run_voigt_fitting(config=config, results=results)
     write_absorption_spectra(
-        path=path, results=results, config=config, internals=internals, sim_attrs=reader.simulation_attributes
+        path=path,
+        results=results,
+        config=config,
+        internals=internals,
+        sim_attrs=reader.simulation_attributes,
+        line_lists=line_lists,
     )
 
     ((sightlines, _, spectra),) = results
@@ -1347,6 +1355,9 @@ def test_absorption_output_read(absorption_run, tmp_path):
         np.testing.assert_allclose(f["OVI1031/flux"][:], spectrum.flux, atol=1e-6)
         assert f["metadata/config_parameters"].attrs["absorption_snr"] == config.absorption_snr
         assert "redshift" in f["header"]
+        offsets = f["OVI1031/voigt/los_offsets"][:]
+        assert len(offsets) == sightlines.n_los + 1
+        assert offsets[-1] == len(f["OVI1031/voigt/log_column"])
 
 
 # voigt fitting
@@ -1562,3 +1573,31 @@ def test_run_voigt_fitting_concatenates_the_sightlines_of_a_set():
     [fitted] = run_voigt_fitting(config=config, results=[(None, None, {"OVI1031": spectra})])
     np.testing.assert_array_equal(fitted["OVI1031"].n_components, [1, 0])
     np.testing.assert_allclose(fitted["OVI1031"].components[0], true, rtol=0.02)
+
+
+def hand_made_line_lists(*, v, n_components, n_regions):
+    n_total, n_regions_total = sum(n_components), sum(n_regions)
+    return SightlineLineLists(
+        components=np.tile([13.0, 20.0, v], (n_total, 1)),
+        errors=np.full((n_total, 3), 0.1),
+        equivalent_width=np.full(n_total, 0.05),
+        reduced_chisq=np.ones(n_total),
+        region=np.zeros(n_total, dtype=np.int64),
+        regions=np.tile([100, 140], (n_regions_total, 1)),
+        n_components=np.array(n_components),
+        n_regions=np.array(n_regions),
+    )
+
+
+def test_write_line_lists_joins_the_sightline_sets(tmp_path):
+    first = hand_made_line_lists(v=500.0, n_components=[2, 0], n_regions=[1, 1])  # second region too short to fit
+    second = hand_made_line_lists(v=700.0, n_components=[1], n_regions=[1])
+    with h5py.File(tmp_path / "line_lists.hdf5", "w") as f:
+        _write_line_lists(group=f.create_group("voigt"), line_lists=[first, second])
+
+    with h5py.File(tmp_path / "line_lists.hdf5", "r") as f:
+        np.testing.assert_array_equal(f["voigt/los_offsets"][:], [0, 2, 2, 3])
+        np.testing.assert_array_equal(f["voigt/region_offsets"][:], [0, 1, 2, 3])
+        np.testing.assert_array_equal(f["voigt/v"][:], [500.0, 500.0, 700.0])  # sets in order
+        assert f["voigt/regions"].shape == (3, 2)
+        assert f["voigt/log_column"].attrs["unit"] == "log10 cm^-2"
