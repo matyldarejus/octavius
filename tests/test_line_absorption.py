@@ -54,6 +54,7 @@ from octavius.line_absorption.absorption_helpers import (
     SightlineParams,
     SightlineParticles,
     Sightlines,
+    SightlineSpectra,
     detect_gas_layout,
     plane_axes,
 )
@@ -115,6 +116,7 @@ from octavius.line_absorption.voigt_fitting import (
     simpler_models,
     split_component,
     starting_guess,
+    run_voigt_fitting,
 )
 from octavius.run_octavius import analyse_snapshot
 from octavius.utils.generate_snapshots import generate_simba_snapshot
@@ -1529,3 +1531,34 @@ def test_voigt_fit_requires_noise():
             absorption_snr=None,
             cores_per_rank=1,
         )
+
+
+def test_run_voigt_fitting_concatenates_the_sightlines_of_a_set():
+    constants = line_constants(transition=load_line_table()["OVI1031"])
+    true = np.array([14.0, 20.0, 500.0])
+    absorbed = model_flux(components=true[None, :], line=constants, n_pixels=400, dv=2.5, kernel=np.ones(1))
+    flux = np.array([absorbed, np.ones(400)]) + continuum(400) - 1.0  # a line, then an empty sightline
+    spectra = SightlineSpectra(
+        line="OVI1031",
+        velocity=(np.arange(400) + 0.5) * 2.5,
+        tau=np.zeros((2, 400)),
+        flux=flux,
+        weighted={},
+        member_column=np.zeros(0),
+        n90=np.zeros(2),
+        ew=np.zeros(2),
+        ew_intrinsic=np.zeros(2),
+        kernel=np.ones(1),
+    )
+    config = OctaviusConfig(
+        snapshot_path=Path("null"),
+        output_dir=Path("null"),
+        simulation_type="SIMBA",
+        halo_id_source="SNAPSHOT",
+        absorption_snr=100.0,  # noise of 0.01, as in the other voigt tests
+        cores_per_rank=1,
+    )
+
+    [fitted] = run_voigt_fitting(config=config, results=[(None, None, {"OVI1031": spectra})])
+    np.testing.assert_array_equal(fitted["OVI1031"].n_components, [1, 0])
+    np.testing.assert_allclose(fitted["OVI1031"].components[0], true, rtol=0.02)

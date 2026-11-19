@@ -215,6 +215,25 @@ GAS_LAYOUTS: dict[str, GasLayout] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class SightlineLineLists:
+    """
+
+    Fitted Voigt components of every sightline in a set for one line, one sightline after another: sightline i
+    owns the n_components[i] rows after those of the sightlines before it, and likewise for its regions.
+
+    """
+
+    components: np.ndarray  # log10 N in cm^-2, b and v in km/s
+    errors: np.ndarray  # 1 sigma
+    equivalent_width: np.ndarray  # rest-frame, in Angstrom
+    reduced_chisq: np.ndarray
+    region: np.ndarray  # index into the sightline's own regions
+    regions: np.ndarray  # pixel ranges; stop > n_pixels across the box edge
+    n_components: np.ndarray
+    n_regions: np.ndarray
+
+
 def detect_gas_layout(*, simulation_type: str, n_metal_columns: int | None) -> GasLayout:
     """
 

@@ -25,7 +25,7 @@ import numpy as np
 # internal imports
 from ..data_management.conventions import OctaviusConfig
 from ..data_management.pack_catalogue_data import write_catalogue_headers
-from .absorption_helpers import SightlineParticles, Sightlines, SightlineSpectra
+from .absorption_helpers import SightlineParticles, Sightlines, SightlineSpectra, SightlineLineLists
 from .line_profiles import load_line_table
 
 ABSORPTION_FORMAT_VERSION = 1
@@ -61,6 +61,7 @@ def write_absorption_spectra(
     internals: "Internals",
     sim_attrs: "SimulationAttributes",
     n_ranks: int = 1,
+    line_lists: list[dict[str, SightlineLineLists]] | None = None,
 ) -> None:
     """
 
@@ -127,6 +128,10 @@ def write_absorption_spectra(
                     ds[rows] = getattr(spectrum, field)
                 for quantity, ds in weighted.items():
                     ds[rows] = spectrum.weighted[quantity]
+            if line_lists is not None:
+                _write_line_lists(
+                    group=group.create_group("voigt"), line_lists=[by_line[name] for by_line in line_lists]
+                )
 
     # write catalogue headers
     write_catalogue_headers(
@@ -137,3 +142,26 @@ def write_absorption_spectra(
         sim_attrs=sim_attrs,
         n_ranks=n_ranks,
     )
+
+
+def _write_line_lists(*, group: h5py.Group, line_lists: list[SightlineLineLists]) -> None:
+    """
+
+    Writes the fitted components of every sightline set one after another: sightline i owns the components
+    los_offsets[i]:los_offsets[i + 1], and the regions region_offsets[i]:region_offsets[i + 1].
+
+    """
+    components = np.concatenate([line_list.components for line_list in line_lists])
+    errors = np.concatenate([line_list.errors for line_list in line_lists])
+    for k, (field, unit) in enumerate([("log_column", "log10 cm^-2"), ("b", "km/s"), ("v", "km/s")]):
+        group.create_dataset(field, data=components[:, k]).attrs["unit"] = unit
+        group.create_dataset(f"{field}_error", data=errors[:, k]).attrs["unit"] = unit
+
+    for field, unit in [("equivalent_width", "Angstrom"), ("reduced_chisq", ""), ("region", ""), ("regions", "pixel")]:
+        data = np.concatenate([getattr(line_list, field) for line_list in line_lists])
+        group.create_dataset(field, data=data).attrs["unit"] = unit
+
+    n_components = np.concatenate([line_list.n_components for line_list in line_lists])
+    n_regions = np.concatenate([line_list.n_regions for line_list in line_lists])
+    group.create_dataset("los_offsets", data=np.concatenate(([0], np.cumsum(n_components))))
+    group.create_dataset("region_offsets", data=np.concatenate(([0], np.cumsum(n_regions))))

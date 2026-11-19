@@ -8,8 +8,14 @@ Original VPFIT routine is described by Davé & Hernquist et al. (1997) (doi: 10.
 
 """
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..data_management import OctaviusConfig
+
 # default libraries
 import math
+import time
 from dataclasses import dataclass
 
 
@@ -22,8 +28,16 @@ from scipy.optimize import least_squares
 # internal imports
 from ..log import get_logger
 from .absorption_computations import deposit_line, profile_half_width
-from .absorption_helpers import LineConstants
-from .spectrum_processing import apply_lsf
+from .absorption_helpers import (
+    LineConstants,
+    SightlineLineLists,
+    SightlineParticles,
+    Sightlines,
+    SightlineSpectra,
+    Transition,
+)
+from .line_profiles import line_constants, load_line_table
+from .spectrum_processing import C_KMS, apply_lsf
 
 logger = get_logger()
 
@@ -553,4 +567,66 @@ def fit_sightline(
         reduced_chisq=reduced_chisq,
         region=region_index,
         regions=regions,
+    )
+
+
+def run_voigt_fitting(
+    *, config: OctaviusConfig, results: list[tuple[Sightlines, SightlineParticles, dict[str, SightlineSpectra]]]
+) -> list[dict[str, SightlineLineLists]]:
+    """
+
+    Fits Voigt component to every spectrum from run_absorption, giving one set of line lists per sightline
+    set, by line name.
+
+    """
+    if config.absorption_snr is None:
+        raise ValueError("Voigt fitting needs 'absorption_snr', as the fit weighs residuals by the noise.")
+
+    start = time.perf_counter()
+    lines = load_line_table()
+    line_lists = [
+        {name: _fit_spectra(spectra=spectra[name], transition=lines[name], config=config) for name in spectra}
+        for _, _, spectra in results
+    ]
+    n_components = sum(int(fitted.n_components.sum()) for by_line in line_lists for fitted in by_line.values())
+    logger.info(f"Fitted {n_components} Voigt components in {time.perf_counter() - start:.1f} s.")
+    return line_lists
+
+
+def _fit_spectra(*, spectra: SightlineSpectra, transition: Transition, config: OctaviusConfig) -> SightlineLineLists:
+    """
+
+    Fits every sightline of one set for one line, with the noise of standard deviation 1 / SNR added in
+    run_absorption, and the LSF kernel that the flux was originally convolved with.
+
+    """
+    constants = line_constants(transition=transition)
+    dv = float(spectra.velocity[1] - spectra.velocity[0])
+    noise = np.full(len(spectra.velocity), 1.0 / config.absorption_snr)
+    fitted = [
+        fit_sightline(
+            flux=flux,
+            noise=noise,
+            dv=dv,
+            line=constants,
+            kernel=spectra.kernel,
+            log_column_bounds=tuple(config.absorption_voigt_log_column_bounds),
+            b_bounds=tuple(config.absorption_voigt_b_bounds),
+            n_sigma=config.absorption_voigt_n_sigma,
+            max_components=config.absorption_voigt_max_components,
+            chisq_factor=config.absorption_voigt_chisq_factor,
+        )
+        for flux in spectra.flux
+    ]
+    return SightlineLineLists(
+        components=np.concatenate([line_list.components for line_list in fitted]),
+        errors=np.concatenate([line_list.errors for line_list in fitted]),
+        equivalent_width=transition.wavelength
+        / C_KMS
+        * np.concatenate([line_list.equivalent_width for line_list in fitted]),
+        reduced_chisq=np.concatenate([line_list.reduced_chisq for line_list in fitted]),
+        region=np.concatenate([line_list.region for line_list in fitted]),
+        regions=np.concatenate([line_list.regions for line_list in fitted]),
+        n_components=np.array([len(line_list.components) for line_list in fitted], dtype=np.int64),
+        n_regions=np.array([len(line_list.regions) for line_list in fitted], dtype=np.int64),
     )
