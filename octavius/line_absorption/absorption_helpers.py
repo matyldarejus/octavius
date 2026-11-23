@@ -228,6 +228,7 @@ class SightlineLineLists:
     errors: np.ndarray  # 1 sigma
     equivalent_width: np.ndarray  # rest-frame, in Angstrom
     reduced_chisq: np.ndarray
+    saturated: np.ndarray  # central optical depth above the threshold
     region: np.ndarray  # index into the sightline's own regions
     regions: np.ndarray  # pixel ranges; stop > n_pixels across the box edge
     n_components: np.ndarray

@@ -1582,6 +1582,7 @@ def hand_made_line_lists(*, v, n_components, n_regions):
         errors=np.full((n_total, 3), 0.1),
         equivalent_width=np.full(n_total, 0.05),
         reduced_chisq=np.ones(n_total),
+        saturated=np.array([True] + [False] * (n_total - 1)) if n_total else np.zeros(0, dtype=bool),
         region=np.zeros(n_total, dtype=np.int64),
         regions=np.tile([100, 140], (n_regions_total, 1)),
         n_components=np.array(n_components),
@@ -1599,5 +1600,6 @@ def test_write_line_lists_joins_the_sightline_sets(tmp_path):
         np.testing.assert_array_equal(f["voigt/los_offsets"][:], [0, 2, 2, 3])
         np.testing.assert_array_equal(f["voigt/region_offsets"][:], [0, 1, 2, 3])
         np.testing.assert_array_equal(f["voigt/v"][:], [500.0, 500.0, 700.0])  # sets in order
+        np.testing.assert_array_equal(f["voigt/saturated"][:], [True, False, True])  # first component of each set
         assert f["voigt/regions"].shape == (3, 2)
         assert f["voigt/log_column"].attrs["unit"] == "log10 cm^-2"

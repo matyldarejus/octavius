@@ -157,7 +157,13 @@ def _write_line_lists(*, group: h5py.Group, line_lists: list[SightlineLineLists]
         group.create_dataset(field, data=components[:, k]).attrs["unit"] = unit
         group.create_dataset(f"{field}_error", data=errors[:, k]).attrs["unit"] = unit
 
-    for field, unit in [("equivalent_width", "Angstrom"), ("reduced_chisq", ""), ("region", ""), ("regions", "pixel")]:
+    for field, unit in [
+        ("equivalent_width", "Angstrom"),
+        ("reduced_chisq", ""),
+        ("saturated", ""),
+        ("region", ""),
+        ("regions", "pixel"),
+    ]:
         data = np.concatenate([getattr(line_list, field) for line_list in line_lists])
         group.create_dataset(field, data=data).attrs["unit"] = unit
 

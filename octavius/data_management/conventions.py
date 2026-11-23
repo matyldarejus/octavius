@@ -116,7 +116,7 @@ ALWAYS_POSITIVE = frozenset(
         "absorption_resolving_power",
         "absorption_voigt_n_sigma",
         "absorption_voigt_max_components",
-        "absorption_voigt_b_bounds",
+        "absorption_voigt_saturation_tau",
     }
 )
 
@@ -260,7 +260,8 @@ class OctaviusConfig:
     absorption_voigt_max_components: int = 15
     absorption_voigt_chisq_factor: float = 0.95
     absorption_voigt_log_column_bounds: list[float] = field(default_factory=lambda: [12.0, 19.0])
-    absorption_voigt_b_bounds: list[float] = field(default_factory=lambda: [1.0, 100.0])
+    absorption_voigt_b_bounds: list[float] = field(default_factory=lambda: [0.0, 100.0])
+    absorption_voigt_saturation_tau: float = 3.0
 
     terminal_output_level: str = "INFO"
     keep_logs: bool = False
@@ -360,6 +361,11 @@ class OctaviusConfig:
         for bounds in ("absorption_voigt_log_column_bounds", "absorption_voigt_b_bounds"):
             if len(getattr(self, bounds)) != 2 or getattr(self, bounds)[0] >= getattr(self, bounds)[1]:
                 raise ValueError(f"'{bounds}' must be [lower, upper] with lower < upper.")
+
+        if self.absorption_voigt_b_bounds[0] < 0.0:
+            raise ValueError(
+                "'absorption_voigt_b_bounds' lower bound must be 0 (set from the thermal width) or positive."
+            )
 
     @classmethod
     def from_yaml(cls, config_path: Path | str, **overrides: Any) -> OctaviusConfig:

@@ -105,7 +105,8 @@ line_absorption:
   absorption_voigt_max_components:    15        # per region
   absorption_voigt_chisq_factor:      0.95      # a new component must lower chi2 to at most this fraction
   absorption_voigt_log_column_bounds: [12, 19]  # log10 cm^-2
-  absorption_voigt_b_bounds:          [1, 100]  # km/s
+  absorption_voigt_b_bounds:          [0, 100]  # km/s
+  absorption_voigt_saturation_tau:    3          
 
 parallelism:
   n_io_chunks:        10    # for IO reads on datasets, not chunking the pipeline
