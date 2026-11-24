@@ -54,7 +54,7 @@ from .spectrum_processing import (
     lsf_kernel,
 )
 from .ion_tables import DEFAULT_BARYON_FRACTION, hydrogen_number_density, ion_counts, ion_fraction, load_ion_table
-from .line_profiles import line_constants, load_line_table
+from .line_profiles import expand_line_names, line_constants, load_line_table
 from .sightlines import (
     assemble_sightline_particles,
     build_explicit_sightlines,
@@ -491,9 +491,7 @@ def _synthesise_spectra(
         return [{} for _ in sightline_sets]
 
     lines = load_line_table()
-    unknown = [name for name in config.absorption_lines if name not in lines]
-    if unknown:
-        raise ValueError(f"Unknown absorption_lines {unknown}; names must match line_absorption/line_data.csv.")
+    names = expand_line_names(names=config.absorption_lines, lines=lines)
     sim = reader.simulation_attributes
     redshift, scale_factor = float(sim.redshift), float(sim.scale_factor)
     hubble = (sim.Hz / u.s).to(u.km / u.s / u.kpc).value  # km/s/kpc
@@ -511,7 +509,7 @@ def _synthesise_spectra(
     ion_table = load_ion_table(table_dir=config.ion_table_dir, pattern=config.ion_table_pattern, redshift=redshift)
 
     logger.info(
-        f"Spectra: {', '.join(config.absorption_lines)} || ion tables {config.ion_table_dir} ({config.ion_table_pattern}), "
+        f"Spectra: {', '.join(names)} || ion tables {config.ion_table_dir} ({config.ion_table_pattern}), "
         f"UVB {config.absorption_uvb}, self-shielding {'on' if config.absorption_self_shielding else 'off'} | "
         f"gas layout {layout.name}, {layout.kernel} kernel."
     )
@@ -522,7 +520,7 @@ def _synthesise_spectra(
 
     # check if hydrogen stored in columns and otherwise calculate using XH = 1 - Y - Z
     stores_hydrogen = "H" in reader.available_elements
-    elements = {lines[name].element for name in config.absorption_lines} - {"H"}
+    elements = {lines[name].element for name in names} - {"H"}
     if stores_hydrogen:
         elements.add("H")
     else:
@@ -545,7 +543,7 @@ def _synthesise_spectra(
 
     # synthesise spectra
     spectra: list[dict[str, SightlineSpectra]] = [{} for _ in sightline_sets]
-    for line_index, name in enumerate(config.absorption_lines):
+    for line_index, name in enumerate(names):
         transition = lines[name]
         constants = line_constants(transition=transition)
         element_fraction = (

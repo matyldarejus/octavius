@@ -74,6 +74,7 @@ from octavius.line_absorption.ion_tables import (
     sigma_hi,
 )
 from octavius.line_absorption.line_profiles import (
+    expand_line_names,
     gaussian,
     gaussian_bin_integral,
     line_constants,
@@ -805,6 +806,12 @@ def test_gaussian_matches_voigt_limit_and_has_unit_area():
     assert np.trapezoid(phi, v) == pytest.approx(1.0, rel=1e-8)
     assert gaussian(0.0, b) == pytest.approx(1.0 / (b * np.sqrt(np.pi)))
     assert gaussian(b, b) == pytest.approx(np.exp(-1.0) / (b * np.sqrt(np.pi)))
+
+
+def test_an_ion_name_stands_for_all_its_lines():
+    lines = load_line_table()
+    assert expand_line_names(names=["OVI"], lines=lines) == ["OVI1031", "OVI1037"]
+    assert expand_line_names(names=["OVI1037", "OVI"], lines=lines) == ["OVI1037", "OVI1031"]  # no repeats
 
 
 # projected kernels

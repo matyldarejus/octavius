@@ -26,7 +26,7 @@ import numpy as np
 from ..data_management.conventions import OctaviusConfig
 from ..data_management.pack_catalogue_data import write_catalogue_headers
 from .absorption_helpers import SightlineParticles, Sightlines, SightlineSpectra, SightlineLineLists
-from .line_profiles import load_line_table
+from .line_profiles import expand_line_names, load_line_table
 
 ABSORPTION_FORMAT_VERSION = 1
 SPECTRUM_DTYPE = np.float32  # rounding error should be far below the typical noise
@@ -95,7 +95,7 @@ def write_absorption_spectra(
         )
 
         # write absorption line results
-        for name in config.absorption_lines:
+        for name in expand_line_names(names=config.absorption_lines, lines=lines):
             velocity = set_spectra[0][name].velocity
             group = f.create_group(name)
             group.attrs["wavelength"] = lines[name].wavelength  # rest frame wavelength in Angstrom

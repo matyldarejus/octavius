@@ -54,6 +54,22 @@ def load_line_table(*, path: Path = LINE_DATA_PATH) -> dict[str, Transition]:
         }
 
 
+def expand_line_names(*, names: list[str], lines: dict[str, Transition]) -> list[str]:
+    """
+
+    Expands specified ion names into line names. For example, ['OVI'] config setting will
+    result in lines being produced for all transitions of OVI within the line_data.
+
+    """
+    expanded: list[str] = []
+    for name in names:
+        matches = [name] if name in lines else [line for line, transition in lines.items() if transition.ion == name]
+        if not matches:
+            raise ValueError(f"Unknown absorption_lines entry '{name}'; use a line or ion name from line_data.csv.")
+        expanded += [line for line in matches if line not in expanded]
+    return expanded
+
+
 def line_constants(*, transition: Transition) -> LineConstants:
     """
 
