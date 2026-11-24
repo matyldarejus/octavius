@@ -53,7 +53,6 @@ GUESS_FLOOR_SIGMA = 1.5  # a guess may not dip more than this many sigma below t
 GUESS_SMOOTHING = 1.0  # pixels, Gaussian width for smoothing the residual
 DCHISQ_PER_COMPONENT = 6.0  # a component must lower the total chi2 by this much
 MIN_REGION_PIXELS = 4
-B_FLOOR_FRACTION = 0.25  # a lower b bound of 0 becomes this fraction
 B_FLOOR_TEMPERATURE = 1.0e4  # in Kelvin
 
 
@@ -661,10 +660,10 @@ def _fit_spectra(*, spectra: SightlineSpectra, transition: Transition, config: O
 def _b_bounds(*, bounds: list[float], line: LineConstants) -> tuple[float, float]:
     """
 
-    Bounds on b for a line, if lower bound is set as default of 0, it is replaced by B_FLOOR_FRACTION of
-    the thermal b at B_FLOOR_TEMPERATURE (0.25, and 10e4 K by default, respectively).
+    Bounds on b for a line, if lower bound is set as default of 0, it is replaced by
+    the thermal b at B_FLOOR_TEMPERATURE (10e4 K by default, respectively).
 
     """
     if bounds[0] == 0.0:
-        return (B_FLOOR_FRACTION * line.b_0 * math.sqrt(B_FLOOR_TEMPERATURE), float(bounds[1]))
+        return (line.b_0 * math.sqrt(B_FLOOR_TEMPERATURE), float(bounds[1]))
     return (float(bounds[0]), float(bounds[1]))
