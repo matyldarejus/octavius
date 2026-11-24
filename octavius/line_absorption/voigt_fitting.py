@@ -188,19 +188,18 @@ def component_tau(
 
 
 def saturated_components(
-    *, components: np.ndarray, line: LineConstants, n_pixels: int, dv: float, kernel: np.ndarray, tau_threshold: float
+    *, components: np.ndarray, line: LineConstants, n_pixels: int, dv: float, tau_threshold: float
 ) -> np.ndarray:
     """
 
-    Whether each component on its own blacks out the spectrum: its model flux, averaged over pixels and smoothed by
-    the LSF, falls below exp(-tau_threshold) somewhere. A component narrower than a pixel or the LSF has a large
-    central optical depth, but never a black pixel, so it is not flagged.
+    Whether each component on its own saturates the spectrum: its optical depth averaged over some pixel exceeds
+    tau_threshold.
 
     """
-    floor = math.exp(-tau_threshold)
-    grid = {"line": line, "n_pixels": n_pixels, "dv": dv, "kernel": kernel}
+    grid = {"line": line, "n_pixels": n_pixels, "dv": dv}
     return np.array(
-        [model_flux(components=component[None, :], **grid).min() < floor for component in components], dtype=bool
+        [component_tau(log_column=c[0], b=c[1], v=c[2], **grid).max() > tau_threshold for c in components],
+        dtype=bool,
     )
 
 
@@ -650,7 +649,6 @@ def _fit_spectra(*, spectra: SightlineSpectra, transition: Transition, config: O
             line=constants,
             n_pixels=len(spectra.velocity),
             dv=dv,
-            kernel=spectra.kernel,
             tau_threshold=config.absorption_voigt_saturation_tau,
         ),
         region=np.concatenate([line_list.region for line_list in fitted]),
