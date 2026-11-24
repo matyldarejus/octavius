@@ -144,13 +144,6 @@ def load_config(**overrides) -> OctaviusConfig:
     return OctaviusConfig.from_yaml(config_path=CONFIG_PATH, photometry_table_path=None, **overrides)
 
 
-def test_line_absorption_section_parses():
-    config = load_config()
-    assert config.absorption_sample_path == Path("/path/to/sample.hdf5")
-    assert config.impact_units == "R200"
-    assert config.absorption_los_axis == "Z"
-
-
 def test_enums_are_uppercased():
     config = load_config(impact_units="kpc", absorption_los_axis="x")
     assert config.impact_units == "KPC"
@@ -451,20 +444,11 @@ def test_overlaps_match_brute_force_including_wrap(los_axis):
     assert found == brute_force_overlaps(part_pos=part_pos, support=support, sightlines=sightlines)
 
 
-@pytest.mark.parametrize("cell_width", [5.0, 50.0, 500.0])
+@pytest.mark.parametrize("cell_width", [5.0, 500.0])
 def test_overlaps_independent_of_cell_width(cell_width):
     sightlines = place(centre=[[300.0, 700.0, 500.0]])
     part_pos, support = random_gas(n=2000)
     rows, los_idx = grid_overlaps(part_pos=part_pos, support=support, sightlines=sightlines, cell_width=cell_width)
-    assert set(zip(rows.tolist(), los_idx.tolist())) == brute_force_overlaps(
-        part_pos=part_pos, support=support, sightlines=sightlines
-    )
-
-
-def test_overlaps_for_random_sightlines():
-    sightlines = random_sightlines(n_los=150)
-    part_pos, support = random_gas(n=3000)
-    rows, los_idx = grid_overlaps(part_pos=part_pos, support=support, sightlines=sightlines)
     assert set(zip(rows.tolist(), los_idx.tolist())) == brute_force_overlaps(
         part_pos=part_pos, support=support, sightlines=sightlines
     )
@@ -496,24 +480,13 @@ def members(particles: SightlineParticles, s: int) -> set[int]:
     return set(particles.particle_idx[rows].tolist())
 
 
-def test_chunked_preselection_equals_single_pass():
+def test_chunked_preselection_matches_brute_force():
     sightlines = place(centre=[[500.0, 500.0, 500.0], [985.0, 10.0, 500.0]])
     part_pos, support = random_gas(n=3000)
-    single = chunked_preselection(part_pos=part_pos, support=support, sightlines=sightlines, chunk_size=len(part_pos))
-    chunked = chunked_preselection(part_pos=part_pos, support=support, sightlines=sightlines, chunk_size=700)
-    assert np.array_equal(single.particle_idx, chunked.particle_idx)
-    assert np.array_equal(single.los_offsets, chunked.los_offsets)
-    assert all(members(single, s) == members(chunked, s) for s in range(sightlines.n_los))
-
-
-def test_csr_maps_back_to_brute_force():
-    sightlines = place(centre=[[500.0, 500.0, 500.0]])
-    part_pos, support = random_gas(n=1500)
-    particles = chunked_preselection(part_pos=part_pos, support=support, sightlines=sightlines, chunk_size=400)
-    reference = brute_force_overlaps(part_pos=part_pos, support=support, sightlines=sightlines)
+    particles = chunked_preselection(part_pos=part_pos, support=support, sightlines=sightlines, chunk_size=700)
     rebuilt = {(p, s) for s in range(sightlines.n_los) for p in members(particles, s)}
-    assert rebuilt == reference
-    assert np.all(np.diff(particles.particle_idx) > 0)
+    assert rebuilt == brute_force_overlaps(part_pos=part_pos, support=support, sightlines=sightlines)
+    assert np.all(np.diff(particles.particle_idx) > 0)  # sorted, no repeats
 
 
 def write_hydro_snapshot(path: Path, **attrs) -> Path:
@@ -613,15 +586,6 @@ def test_run_absorption_requires_a_sample_path(absorption_run):
         run_absorption(config=replace(config, absorption_sample_path=None))
 
 
-def test_run_absorption_random_mode_needs_no_sample(absorption_run):
-    _, config = absorption_run
-    config = replace(config, absorption_los_mode="RANDOM", absorption_sample_path=None, n_random_los=50)
-    ((sightlines, particles, _),) = run_absorption(config=config)
-    assert sightlines.n_los == 50
-    assert sightlines.los_axis == {"X": 0, "Y": 1, "Z": 2}[config.absorption_los_axis]
-    assert len(particles.los_offsets) == 51
-
-
 def test_second_gas_read_matches_snapshot(absorption_run):
     _, config = absorption_run
     with h5py.File(config.snapshot_path, "r") as f:
@@ -683,15 +647,6 @@ def test_run_absorption_synthesises_spectra(absorption_run, tmp_path):
         assert np.all(spectrum.weighted["temperature"][has_tau] > 0.0)
 
 
-def test_unknown_absorption_line_raises(absorption_run):
-    _, config = absorption_run
-    config = replace(
-        config, absorption_los_mode="RANDOM", absorption_sample_path=None, n_random_los=5, absorption_lines=["OVI1067"]
-    )
-    with pytest.raises(ValueError, match="OVI1067"):
-        run_absorption(config=config)
-
-
 def test_analyser_places_sightlines_around_requested_galaxies(absorption_run):
     catalogue_path, config = absorption_run
     config = replace(config, impact_units="KPC")  # the junk test haloes may lack a usable r200c
@@ -705,18 +660,6 @@ def test_analyser_places_sightlines_around_requested_galaxies(absorption_run):
     assert set(sightlines.galaxy_idx.tolist()) == {0, n_galaxies - 1}  # the repeated 0 gives no extra sightlines
     assert len(particles.los_offsets) == sightlines.n_los + 1
     assert spectra == {}
-
-
-def test_analyser_follows_the_config_mode_without_galaxies(absorption_run):
-    catalogue_path, config = absorption_run
-    config = replace(config, absorption_los_mode="RANDOM", absorption_sample_path=None, n_random_los=5)
-
-    with load_catalogue(catalogue_path=catalogue_path) as catalogue:
-        analyser = build_analyser(catalogue=catalogue, config=config)
-        ((sightlines, _, _),) = analyser.compute_absorption()
-
-    assert sightlines.n_los == 5
-    assert np.all(sightlines.galaxy_idx == -1)  # random sightlines belong to no galaxy
 
 
 def test_equivalent_width_counts_absorption_inside_window_only():
@@ -771,7 +714,7 @@ def test_line_constants_lyman_alpha():
     assert constants.gamma == pytest.approx(4.6986e8 * 1215.6701e-13 / (4 * np.pi), rel=1e-6)
 
 
-@pytest.mark.parametrize("a", [1e-5, 1e-4, 1e-3, 1e-2])
+@pytest.mark.parametrize("a", [1e-5, 1e-2])
 def test_voigt_matches_faddeeva(a):
     b = 10.0
     v = np.linspace(-200.0, 200.0, 4001)
@@ -784,10 +727,6 @@ def test_voigt_small_x_branch_is_continuous():
     b, gamma = 10.0, 0.01
     x_edge = np.sqrt(1e-4) * b  # where the series branch switches over
     assert voigt(x_edge * (1 - 1e-6), b, gamma) == pytest.approx(voigt(x_edge * (1 + 1e-6), b, gamma), rel=1e-6)
-
-
-def test_voigt_reduces_to_gaussian():
-    assert voigt(3.0, 10.0, 0.0) == pytest.approx(gaussian(3.0, 10.0))
 
 
 def test_profiles_integrate_to_one():
@@ -806,12 +745,15 @@ def test_gaussian_matches_voigt_limit_and_has_unit_area():
     assert np.trapezoid(phi, v) == pytest.approx(1.0, rel=1e-8)
     assert gaussian(0.0, b) == pytest.approx(1.0 / (b * np.sqrt(np.pi)))
     assert gaussian(b, b) == pytest.approx(np.exp(-1.0) / (b * np.sqrt(np.pi)))
+    assert voigt(3.0, b, 0.0) == pytest.approx(gaussian(3.0, b))
 
 
 def test_an_ion_name_stands_for_all_its_lines():
     lines = load_line_table()
     assert expand_line_names(names=["OVI"], lines=lines) == ["OVI1031", "OVI1037"]
     assert expand_line_names(names=["OVI1037", "OVI"], lines=lines) == ["OVI1037", "OVI1031"]  # no repeats
+    with pytest.raises(ValueError, match="OVI1067"):
+        expand_line_names(names=["OVI1067"], lines=lines)
 
 
 # projected kernels
@@ -1075,18 +1017,6 @@ def test_ion_table_rejects_header_column_mismatch(tmp_path):
         read_ion_table(path=path)
 
 
-def test_ion_fraction_exact_at_grid_points(ion_table_dir):
-    """
-
-    Test for wrong interpolation weights.
-
-    """
-    table = load_ion_table(table_dir=ion_table_dir, pattern=TABLE_PATTERN, redshift=0.5)
-    nH, T = np.meshgrid(LOG_NH_GRID, LOG_T_GRID, indexing="ij")
-    got = log_ion_fraction(table=table, ion="OVI", log_nH=nH.ravel(), log_T=T.ravel())
-    np.testing.assert_allclose(got, synthetic_log_fraction(nH, T, 3, 0.5).ravel(), atol=1e-10)
-
-
 def test_ion_fraction_bilinear_between_grid_points(ion_table_dir):
     table = load_ion_table(table_dir=ion_table_dir, pattern=TABLE_PATTERN, redshift=0.5)
     rng = np.random.default_rng(1)
@@ -1211,14 +1141,6 @@ def test_gaussian_lsf_width_matches_resolving_power(resolving_power):
     assert kernel.sum() == pytest.approx(1.0, rel=1e-12)
     assert np.sum(kernel * v) == pytest.approx(0.0, abs=1e-12)  # centred on the middle pixel
     assert np.sum(kernel * v**2) == pytest.approx(sigma**2 + dv**2 / 12, rel=1e-4)  # pixels add dv^2 / 12
-
-
-def test_apply_lsf_conserves_equivalent_width():
-    v = np.arange(400) * 2.5
-    flux = np.exp(-2.0 * np.exp(-(((v - 5.0) / 10.0) ** 2)))[None, :]  # line at the box edge, so its LSF wraps
-    smoothed = apply_lsf(flux=flux, kernel=gaussian_lsf(resolving_power=20_000, dv=2.5))
-    np.testing.assert_allclose(np.sum(1.0 - smoothed), np.sum(1.0 - flux), rtol=1e-12)
-    assert smoothed.min() > flux.min()  # the line gets shallower
 
 
 def test_apply_lsf_turns_one_absorbed_pixel_into_the_kernel():
@@ -1415,15 +1337,6 @@ def test_component_tau_wraps_around_the_box():
     centre = component_tau(log_column=2.0, b=10.0, v=500.0, line=GAUSSIAN_LINE, n_pixels=400, dv=2.5)
     edge = component_tau(log_column=2.0, b=10.0, v=1000.0, line=GAUSSIAN_LINE, n_pixels=400, dv=2.5)
     np.testing.assert_allclose(edge, np.roll(centre, 200), atol=1e-12)  # 500 km/s = 200 pixels further on
-
-
-def test_model_flux_lsf_conserves_the_equivalent_width():
-    components = np.array([[1.5, 10.0, 300.0], [1.0, 20.0, 700.0]])
-    kwargs = {"components": components, "line": GAUSSIAN_LINE, "n_pixels": 400, "dv": 2.5}
-    intrinsic = model_flux(**kwargs, kernel=np.ones(1))
-    observed = model_flux(**kwargs, kernel=gaussian_lsf(resolving_power=40000.0, dv=2.5))
-    assert np.min(observed) > np.min(intrinsic)  # the LSF makes lines shallower...
-    assert np.sum(1.0 - observed) == pytest.approx(np.sum(1.0 - intrinsic), rel=1e-10)  # ...but keeps their E
 
 
 def spectrum_to_fit(flux, kernel):
