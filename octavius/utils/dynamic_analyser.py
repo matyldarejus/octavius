@@ -289,17 +289,22 @@ class OctaviusAnalyser:
         return results
 
     def compute_absorption(
-        self, group_indices: list[int] | np.ndarray | None = None
+        self, group_indices: list[int] | np.ndarray | None = None, path: Path | None = None
     ) -> list[tuple["Sightlines", "SightlineParticles", dict[str, "SightlineSpectra"]]]:
         """
 
         Produces mock absorption spectra along sightlines placed around the galaxies specified by group_indices.
+
+        If absorption_voigt_fit = True, it fits the spectra, and then saves the produced fits in a .HDF5 file.
 
 
         Parameters
         ----------
         group_indices: list[int]
             The indices into the Octavius catalogue of the galaxies to place sightlines around.
+        path: Path
+            Where to write the spectra file. Defaults to octavius_<snapshot>_absorption.hdf5 next
+            to the catalogue.
 
         Returns
         ----------
@@ -309,12 +314,14 @@ class OctaviusAnalyser:
         """
         from ..line_absorption import run_absorption
         from ..line_absorption.absorption_helpers import LOS_AXIS_IDX, SampleEntries
+        from ..line_absorption.absorption_output import absorption_output_path, write_absorption_spectra
+        from ..line_absorption.voigt_fitting import run_voigt_fitting
 
         # the reader's snapshot may override the config's, and the remaining direct snapshot reads use the config
         config = replace(self._config, snapshot_path=self._reader.snapshot_path)
         entries = None
 
-        if group_indices is not None:  # placee sightlines around the given galaxies
+        if group_indices is not None:  # place sightlines around the given galaxies
             group_type = "galaxies"
             if group_type not in self._collections:
                 raise KeyError(f"'{group_type}' is not present in the catalogue.")
@@ -336,7 +343,25 @@ class OctaviusAnalyser:
                 bin_label=None,
             )
 
-        return run_absorption(config=config, reader=self._reader, catalogue=self._catalogue, entries=entries)
+        results = run_absorption(config=config, reader=self._reader, catalogue=self._catalogue, entries=entries)
+
+        # optionally run the fitter
+        line_lists = run_voigt_fitting(config=config, results=results) if config.absorption_voigt_fit else None
+
+        if path is None:
+            path = absorption_output_path(
+                snapshot_path=self._reader.snapshot_path, output_dir=self._catalogue._cat.parent
+            )
+        write_absorption_spectra(
+            path=path,
+            results=results,
+            config=config,
+            internals=self._internals,
+            sim_attrs=self._reader.simulation_attributes,
+            line_lists=line_lists,
+        )
+        logger.info(f"Wrote absorption spectra{' and Voigt fits' if line_lists is not None else ''} to {path}.")
+        return results
 
     def compute_ptype_specific_properties(self, group_indices: list[int] | np.ndarray, group_type: str) -> StageResult:
         """

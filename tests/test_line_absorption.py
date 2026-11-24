@@ -60,6 +60,7 @@ from octavius.line_absorption.absorption_helpers import (
     plane_axes,
 )
 from octavius.line_absorption.absorption_output import (
+    absorption_output_path,
     _write_line_lists,
     write_absorption_spectra,
 )
@@ -1523,3 +1524,26 @@ def test_write_line_lists_joins_the_sightline_sets(tmp_path):
         np.testing.assert_array_equal(f["voigt/saturated"][:], [True, False, True])  # first component of each set
         assert f["voigt/regions"].shape == (3, 2)
         assert f["voigt/log_column"].attrs["unit"] == "log10 cm^-2"
+
+
+def test_analyser_fits_and_writes_next_to_the_catalogue(absorption_run, tmp_path):
+    catalogue_path, config = absorption_run
+    for z in (0.0, 0.5, 1.0):
+        write_ion_table(tmp_path / f"lt{round(z * 1e4):05d}f100_i31", z)
+    config = replace(
+        config,
+        absorption_los_mode="RANDOM",
+        absorption_sample_path=None,
+        n_random_los=10,
+        absorption_lines=["OVI1031"],
+        ion_table_dir=tmp_path,
+        ion_table_pattern=TABLE_PATTERN,
+        absorption_voigt_fit=True,
+    )
+
+    with load_catalogue(catalogue_path=catalogue_path) as catalogue:
+        ((sightlines, _, _),) = build_analyser(catalogue=catalogue, config=config).compute_absorption()
+
+    path = absorption_output_path(snapshot_path=config.snapshot_path, output_dir=catalogue_path.parent)
+    with h5py.File(path, "r") as f:
+        assert len(f["OVI1031/voigt/los_offsets"]) == sightlines.n_los + 1
